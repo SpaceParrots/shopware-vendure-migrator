@@ -32,8 +32,9 @@ async function main() {
     if (stage === 'transform' || stage === 'all') await (await import('./transform.mjs')).transform(config, snapshotDir);
     if (stage === 'load' || stage === 'all') await (await import('./load.mjs')).load(config, snapshotDir);
     if (stage === 'verify' || stage === 'all') await (await import('./verify.mjs')).verify(config, snapshotDir);
-    if (!['extract', 'transform', 'load', 'verify', 'all'].includes(stage)) {
-        throw new Error(`Unknown stage "${stage}". Use extract, transform, load, verify or all.`);
+    if (stage === 'oracle') await (await import('./oracle.mjs')).oracle(config, snapshotDir);
+    if (!['extract', 'transform', 'load', 'verify', 'oracle', 'all'].includes(stage)) {
+        throw new Error(`Unknown stage "${stage}". Use extract, transform, load, verify, oracle or all.`);
     }
 }
 
