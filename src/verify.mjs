@@ -7,7 +7,20 @@ import { Bindings } from './lib/bindings.mjs';
 import { log, readJson, writeJson } from './lib/util.mjs';
 import { VendureClient } from './lib/vendure-client.mjs';
 
-const JOB_WAIT_MS = 10 * 60 * 1000;
+const JOB_WAIT_MS = Number(process.env.VERIFY_JOB_WAIT_MINUTES ?? 45) * 60 * 1000;
+const QUEUES = ['apply-collection-filters', 'update-search-index', 'send-email', 'clean-sessions'];
+
+async function jobTotalsByQueue(client) {
+    const out = {};
+    for (const queue of QUEUES) {
+        const { jobs } = await client.gql(
+            `query($q: String!) { jobs(options: { filter: { queueName: { eq: $q } }, take: 1 }) { totalItems } }`,
+            { q: queue },
+        );
+        out[queue] = jobs.totalItems;
+    }
+    return out;
+}
 
 async function waitForJobs(client) {
     const t0 = Date.now();
@@ -47,6 +60,8 @@ export async function verify(config, snapshotDir) {
     await client.login();
 
     const jobWaitMs = await waitForJobs(client);
+    const jobTotals = await jobTotalsByQueue(client);
+    log(`verify: job queue drained after ${jobWaitMs} ms of waiting; totals ${JSON.stringify(jobTotals)}`);
     const checks = [];
     const check = (id, description, expected, actual, detail) => {
         const pass = JSON.stringify(expected) === JSON.stringify(actual);
@@ -153,7 +168,7 @@ export async function verify(config, snapshotDir) {
         target: { adminApi: config.target.adminApi, label: process.env.TARGET_LABEL ?? 'unlabelled' },
         verifiedAt: new Date().toISOString(),
     };
-    const report = { identity, jobWaitMs, checks, mismatches, membership, translationMismatches, load: loadResult };
+    const report = { identity, jobWaitMs, jobTotals, checks, mismatches, membership, translationMismatches, load: loadResult };
     await writeJson(path.join(snapshotDir, 'verify-report.json'), report);
     await fs.writeFile(path.join(snapshotDir, 'report.md'), renderMarkdown(report, model, gaps, decisions), 'utf8');
     const failed = checks.filter(x => !x.pass).length;
@@ -172,6 +187,7 @@ function renderMarkdown(report, model, gaps, decisions) {
     if (load) {
         lines.push('## Load', '');
         lines.push(`${load.failures.length} failures. Timings (ms): ${Object.entries(load.timings).map(([k, v]) => `${k} ${v}`).join(', ')}.`, '');
+        lines.push(`Background jobs created by the load, per queue: ${Object.entries(report.jobTotals).map(([k, v]) => `${k} ${v}`).join(', ')}. The verify waited ${Math.round(report.jobWaitMs / 1000)} s for the queue to drain after it started.`, '');
         for (const f of load.failures.slice(0, 20)) lines.push(`- ${f.step} ${f.sourceId}: ${f.message}`);
         lines.push('');
     }
