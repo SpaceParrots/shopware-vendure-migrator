@@ -1,0 +1,20 @@
+{
+  "name": "shopware-vendure-migrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Catalogue migration from Shopware 6 to Vendure 3. Experimental, local use.",
+  "scripts": {
+    "extract": "node src/cli.mjs extract",
+    "transform": "node src/cli.mjs transform",
+    "load": "node src/cli.mjs load",
+    "verify": "node src/cli.mjs verify",
+    "all": "node src/cli.mjs all"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "mysql2": "^3.24.4"
+  }
+}
