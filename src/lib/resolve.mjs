@@ -56,6 +56,24 @@ export function resolveTranslated(languages, ownByLang, parentByLang, field, sys
     return out;
 }
 
+/**
+ * Untranslated-fallback lookup for plain translation tables (property groups, options,
+ * manufacturers, countries, media): the value of `field` per Vendure language code.
+ * @param {Array<{ sourceId: string, code: string }>} languages
+ * @param {Array<{ language_id: string }>|undefined} rows Translation rows of one entity.
+ * @param {string} field Column to read.
+ * @returns {Record<string, unknown>} code -> value. Rows in unknown languages are skipped. Never throws.
+ */
+export function valuesByCode(languages, rows, field) {
+    const codeById = new Map(languages.map(l => [l.sourceId, l.code]));
+    const out = {};
+    for (const r of rows ?? []) {
+        const code = codeById.get(r.language_id);
+        if (code) out[code] = r[field];
+    }
+    return out;
+}
+
 /** Keeps only values authored in their own language; the default language is always kept. */
 export function authoredOnly(resolved, defaultLanguageCode) {
     const out = {};
