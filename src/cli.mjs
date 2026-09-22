@@ -83,8 +83,7 @@ async function main() {
     }
     if (stage === 'oracle') {
         const result = await (await import('./oracle.mjs')).oracle(config, snapshotDir);
-        const mismatches = Object.values(result.resolver).reduce((n, list) => n + list.length, 0);
-        if (mismatches) problems.push(`oracle found ${mismatches} resolver mismatches (oracle-report.json)`);
+        if (result.resolverMismatches) problems.push(`oracle found ${result.resolverMismatches} resolver mismatches (oracle-report.json)`);
     }
     if (problems.length) {
         for (const p of problems) logError(`FAILED ${p}`);
