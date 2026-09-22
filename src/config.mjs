@@ -118,20 +118,31 @@ export function newSnapshotName(now = new Date()) {
 }
 
 /**
- * The newest snapshot folder. Only timestamp-named folders count, so a copied or hand-made
- * folder such as `backup` cannot sort after the real ones and be picked up silently.
+ * Snapshot folders under <outDir>/snapshots, oldest first. Only timestamp-named folders count,
+ * so a copied or hand-made folder such as `backup` is neither picked as the newest snapshot nor
+ * replayed as a load journal. Timestamp names sort in creation order.
+ * @param {string} outDir
+ * @returns {Promise<string[]>} Absolute paths; empty when the snapshots folder does not exist.
+ */
+export async function snapshotFolders(outDir) {
+    const dir = path.resolve(outDir, 'snapshots');
+    return (await fs.readdir(dir, { withFileTypes: true }).catch(() => []))
+        .filter(e => e.isDirectory() && SNAPSHOT_NAME.test(e.name))
+        .map(e => e.name)
+        .sort()
+        .map(name => path.join(dir, name));
+}
+
+/**
+ * The newest snapshot folder, by the rule of snapshotFolders.
  * @param {string} outDir
  * @returns {Promise<string>} Absolute path of the snapshot folder.
  * @throws {Error} When no snapshot exists.
  */
 export async function latestSnapshot(outDir) {
-    const dir = path.join(outDir, 'snapshots');
-    const entries = (await fs.readdir(dir, { withFileTypes: true }).catch(() => []))
-        .filter(e => e.isDirectory() && SNAPSHOT_NAME.test(e.name))
-        .map(e => e.name)
-        .sort();
-    if (!entries.length) throw new Error(`No snapshot found in ${dir}; run extract first.`);
-    return path.join(dir, entries[entries.length - 1]);
+    const folders = await snapshotFolders(outDir);
+    if (!folders.length) throw new Error(`No snapshot found in ${path.resolve(outDir, 'snapshots')}; run extract first.`);
+    return folders[folders.length - 1];
 }
 
 /**

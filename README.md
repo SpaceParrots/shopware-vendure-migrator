@@ -162,7 +162,7 @@ Writes `oracle-report.json`, which also records the time of the measurement and 
 
 `bindings.json` and every journal line record the Admin API URL they were written for. Ids from one Vendure mean nothing in another, so `load`, `verify` and `oracle` refuse to run when `VENDURE_ADMIN_API` differs. Use a separate `MIGRATOR_OUT_DIR` per target. A `bindings.json` from before the URL was recorded is adopted for the current URL.
 
-Bindings are written to `bindings.json` in batches of 100 and at the end of each step. Every create is also appended to the snapshot's `load-journal.ndjson` right after Vendure returns the new id. When `load` starts, it replays the journals of all snapshots, oldest first, on top of `bindings.json` and saves the result. A crash between two batches therefore loses no bindings. If the crash cut the last journal line in half, that line is dropped and cut from the file. A binding to an empty id is refused. `verify` and `oracle` replay the same journals read-only and write nothing back.
+Bindings are written to `bindings.json` in batches of 100 and at the end of each step. Every create is also appended to the snapshot's `load-journal.ndjson` right after Vendure returns the new id. When `load` starts, it replays the journals of all snapshots, oldest first, on top of `bindings.json` and saves the result. Only timestamp-named snapshot folders count, the same rule as for the newest snapshot; the current snapshot's journal is always replayed last, also when `--snapshot` names a folder without a timestamp. A crash between two batches therefore loses no bindings. If the crash cut the last journal line in half, that line is dropped and cut from the file. A binding to an empty id is refused. `verify` and `oracle` replay the same journals read-only and write nothing back.
 
 To start over, empty Vendure and delete `bindings.json` together with the `load-journal.ndjson` files. Deleting only one of them brings back bindings to objects that no longer exist, or loses bindings to objects that do.
 
@@ -218,7 +218,7 @@ npm test
 
 The tests use `node:test` and need no database or server; Vendure, Shopware and MySQL are stubbed where a stage needs them.
 
-- `test/bindings.test.mjs`: crash recovery through the journal, torn journal lines, replay order across snapshots, read-only opens, serialized flushes, empty ids, and the recorded target URL.
+- `test/bindings.test.mjs`: crash recovery through the journal, torn journal lines, replay order across snapshots, that only timestamp-named snapshot folders are replayed, read-only opens, serialized flushes, empty ids, and the recorded target URL.
 - `test/client-http.test.mjs`: timeouts, status in errors, bounded retries, and that queries retry while mutations and asset uploads do not.
 - `test/config-load.test.mjs`: credentials per stage, empty values, number and URL validation, that `.env.example` lists every variable, and the snapshot folder rules.
 - `test/load-dependencies.test.mjs`: missing dependencies hold back dependent objects, offers without price or tax are refused, the variant price follows the channel mode, and partly created option groups and facets are completed without duplicates.

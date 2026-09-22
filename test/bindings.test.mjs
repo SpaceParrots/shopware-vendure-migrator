@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { latestSnapshot } from '../src/config.mjs';
 import { Bindings, openBindings, snapshotJournals } from '../src/lib/bindings.mjs';
 
 async function tempFiles(t) {
@@ -81,6 +82,26 @@ test('snapshot journals replay oldest first with the current snapshot last', asy
     assert.equal((await openBindings(config(dir), current, { readOnly: true })).get('product', 'p1', 'product'), '2');
     const newest = path.join(dir, 'snapshots', '2026-09-22T10-00-00-000Z');
     assert.equal((await openBindings(config(dir), newest, { readOnly: true })).get('product', 'p1', 'product'), '3');
+});
+
+test('journal discovery skips the snapshot folders latestSnapshot skips, except the current one', async t => {
+    const dir = await outDir(t);
+    const key = Bindings.key('product', 'p1', 'product');
+    await writeJournal(dir, '2026-09-20T10-00-00-000Z', [{ key, targetId: '1' }]);
+    // Sorts after every timestamp, so replaying it would make its binding win.
+    await writeJournal(dir, 'zz-backup', [{ key, targetId: 'stale' }]);
+    await writeJournal(dir, 'custom', [{ key: Bindings.key('product', 'p2', 'product'), targetId: '7' }]);
+
+    const newest = await latestSnapshot(dir);
+    assert.deepEqual((await snapshotJournals(dir, newest)).map(f => path.basename(path.dirname(f))), ['2026-09-20T10-00-00-000Z']);
+    assert.equal((await openBindings(config(dir), newest, { readOnly: true })).get('product', 'p1', 'product'), '1');
+
+    // A folder named with --snapshot is still the current snapshot, so its own journal is replayed last.
+    const custom = path.join(dir, 'snapshots', 'custom');
+    assert.deepEqual((await snapshotJournals(dir, custom)).map(f => path.basename(path.dirname(f))), ['2026-09-20T10-00-00-000Z', 'custom']);
+    const b = await openBindings(config(dir), custom, { readOnly: true });
+    assert.equal(b.get('product', 'p1', 'product'), '1');
+    assert.equal(b.get('product', 'p2', 'product'), '7');
 });
 
 test('a read-only open sees unflushed journals but writes nothing', async t => {

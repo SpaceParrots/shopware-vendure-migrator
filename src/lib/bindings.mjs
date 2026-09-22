@@ -10,6 +10,7 @@
 // in another, so opening the table for a different URL is refused instead of skipping creates.
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { snapshotFolders } from '../config.mjs';
 
 const FLUSH_EVERY = 100;
 export const BINDINGS_FILE = 'bindings.json';
@@ -25,20 +26,15 @@ const sameTarget = (a, b) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
 /**
  * Journal files of every snapshot, oldest first, with the current snapshot's last. `all` starts
  * a new snapshot per run, so bindings a crashed run did not flush sit in an older snapshot.
- * Snapshot names are timestamps, so name order is creation order.
+ * The other snapshots are the ones snapshotFolders lists, by the same rule latestSnapshot uses:
+ * a folder without a timestamp name, such as a copied `backup`, is not replayed.
  * @param {string} outDir Folder holding `snapshots/`.
  * @param {string} snapshotDir The current snapshot; its journal is always last, even when the
- *   folder does not exist yet.
+ *   folder does not exist yet or has no timestamp name.
  * @returns {Promise<string[]>} Paths of journal files; some may not exist.
  */
 export async function snapshotJournals(outDir, snapshotDir) {
-    const dir = path.join(outDir, 'snapshots');
-    const others = (await fs.readdir(dir, { withFileTypes: true }).catch(() => []))
-        .filter(e => e.isDirectory())
-        .map(e => e.name)
-        .sort()
-        .map(name => path.join(dir, name))
-        .filter(d => path.resolve(d) !== path.resolve(snapshotDir));
+    const others = (await snapshotFolders(outDir)).filter(d => d !== path.resolve(snapshotDir));
     return [...others, snapshotDir].map(d => path.join(d, JOURNAL_FILE));
 }
 
