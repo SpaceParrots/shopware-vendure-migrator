@@ -20,7 +20,7 @@ The tool is experimental. It is meant to be read and adapted, not run unchanged 
 ## What it does not migrate
 
 - Customers, orders and CMS layouts.
-- Rule prices (Shopware's advanced prices). Only the base price is migrated. `transform` reports the rule prices in `gaps.json` with row and rule counts, and `oracle` measures how far the guest price in Shopware differs from the Vendure price. `sketches/shopware-rule-prices/` holds a sketch of a Vendure plugin that could close this gap. It was never run and is not part of the migrator. The text in `gaps.json` names the folder the sketch had in its original workspace; in this repository it is `sketches/shopware-rule-prices/`.
+- Rule prices (Shopware's advanced prices). Only the base price is migrated. `transform` reports the rule prices in `gaps.json` with row and rule counts, and `oracle` measures how far the guest price in Shopware differs from the Vendure price. `sketches/shopware-rule-prices/` holds a sketch of a Vendure plugin that could close this gap. It was never run and is not part of the migrator.
 - Category media, manufacturer media and links, property option colours and media, cross-selling, product reviews, purchase and reference units, dimensions and weight.
 
 `gaps.json` lists every gap with a count, so you can see what applies to your shop before deciding anything.
