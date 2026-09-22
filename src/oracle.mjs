@@ -10,6 +10,7 @@ import { openBindings } from './lib/bindings.mjs';
 import { request } from './lib/http.mjs';
 import { log, readJson, toMinorUnits, writeJson } from './lib/util.mjs';
 import { VendureClient } from './lib/vendure-client.mjs';
+import { channelPrice } from './load/context.mjs';
 import { resolvePrice } from './transform/prices.mjs';
 
 const PAGE_ADMIN = 500;
@@ -65,7 +66,7 @@ async function vendureVariants(client) {
     for (let skip = 0; ; skip += 100) {
         const { productVariants } = await client.gql(
             `query($skip: Int!) { productVariants(options: { take: 100, skip: $skip }) { totalItems items {
-                id sku name priceWithTax enabled product { name } } } }`,
+                id sku name price priceWithTax enabled product { name } } } }`,
             { skip },
         );
         out.push(...productVariants.items);
@@ -75,16 +76,22 @@ async function vendureVariants(client) {
 
 /**
  * Compares every model offer with Shopware's Admin API (resolved base price, tax, active flag),
- * the Store API (name, guest price) and the Vendure variant bound to it.
+ * the Store API (name, guest price) and the Vendure variant bound to it. Prices are compared in
+ * the channel mode, `model.pricesIncludeTax`: gross when the channel shows gross prices, else net.
  * @returns {{ r: object, guestTier1: Map<string, number|null> }} `r` holds the counts and lists
- *   of the report; `guestTier1` the observed quantity-1 rule price per product, or null.
+ *   of the report, and `priceField` ('gross' or 'net'); `guestTier1` the observed quantity-1 rule
+ *   price per product, or null.
  */
 export function compareOffers({ model, bindings, admin, store, vendure }) {
     const adminById = new Map(admin.map(p => [p.id, p]));
     const storeById = new Map(store.map(p => [p.id, p]));
     const vendureById = new Map(vendure.map(v => [String(v.id), v]));
+    // The channel mode picks the price the shop shows, as in load and verify: gross is
+    // priceWithTax, net is price.
+    const vendurePrice = v => (model.pricesIncludeTax ? v.priceWithTax : v.price);
     const r = {
         compared: 0,
+        priceField: model.pricesIncludeTax ? 'gross' : 'net',
         resolver: { basePriceMismatch: [], taxMismatch: [], activeMismatch: [], missingInAdminApi: [], missingInVendure: [] },
         names: { mismatch: [], notInStoreApi: 0 },
         guestPrice: { comparable: 0, equal: 0, different: 0, higherInShopware: 0, lowerInShopware: 0, maxAbsDiffMinor: 0, sumAbsDiffMinor: 0, withTierPrices: 0, examples: [] },
@@ -101,13 +108,15 @@ export function compareOffers({ model, bindings, admin, store, vendure }) {
             if (!a) { r.resolver.missingInAdminApi.push(o.sku); continue; }
 
             // Resolver check: Shopware's own inheritance vs the migrator's.
-            // Converted by transform's rule, so a linked sub-cent gross that transform rounds on
-            // purpose is not reported as a resolver mismatch; the check is about inheritance.
+            // The price is the one load sends for the channel mode, gross or net. Converted by
+            // transform's rule, so a linked sub-cent price that transform rounds on purpose is not
+            // reported as a resolver mismatch; the check is about inheritance.
             const priceEntry = (a.price ?? []).find(p => p.currencyId === SHOPWARE.CURRENCY);
-            const pricing = { currencyId: SHOPWARE.CURRENCY, decimals: model.currencyDecimals ?? 2, pricesIncludeTax: true };
-            const shopwareGross = priceEntry ? resolvePrice({ [`c${SHOPWARE.CURRENCY}`]: priceEntry }, pricing).priceGrossMinor : null;
-            if (shopwareGross !== o.priceGrossMinor || (v && v.priceWithTax !== shopwareGross)) {
-                r.resolver.basePriceMismatch.push({ sku: o.sku, shopware: shopwareGross, model: o.priceGrossMinor, vendure: v?.priceWithTax });
+            const pricing = { currencyId: SHOPWARE.CURRENCY, decimals: model.currencyDecimals ?? 2, pricesIncludeTax: model.pricesIncludeTax };
+            const shopwarePrice = priceEntry ? channelPrice(model, resolvePrice({ [`c${SHOPWARE.CURRENCY}`]: priceEntry }, pricing)) : null;
+            const modelPrice = channelPrice(model, o);
+            if (shopwarePrice !== modelPrice || (v && vendurePrice(v) !== shopwarePrice)) {
+                r.resolver.basePriceMismatch.push({ sku: o.sku, shopware: shopwarePrice, model: modelPrice, vendure: v ? vendurePrice(v) : undefined });
             }
             if (a.taxId !== o.taxSourceId) r.resolver.taxMismatch.push({ sku: o.sku, shopware: a.taxId, model: o.taxSourceId });
             if (Boolean(a.active) !== o.enabled) r.resolver.activeMismatch.push({ sku: o.sku, shopware: a.active, model: o.enabled });
@@ -121,14 +130,15 @@ export function compareOffers({ model, bindings, admin, store, vendure }) {
 
             // Gap measurement: what a guest pays in Shopware vs the base price Vendure charges.
             // calculatedPrice is always the BASE price; rule prices live in calculatedPrices, sorted by
-            // quantity, and the first tier covers quantity 1. That is what the storefront shows.
+            // quantity, and the first tier covers quantity 1. That is what the storefront shows, gross
+            // or net by the same channel mode, so it is compared with the channel-mode Vendure price.
             const tiers = s.calculatedPrices ?? [];
             const guest = toMinorUnits(tiers.length ? tiers[0].unitPrice : s.calculatedPrice?.unitPrice);
             if (!guest.ok || !v) continue;
             r.guestPrice.comparable++;
             if (tiers.length) r.guestPrice.withTierPrices++;
             guestTier1.set(o.sourceId, tiers.length ? guest.minor : null);
-            const diff = guest.minor - v.priceWithTax;
+            const diff = guest.minor - vendurePrice(v);
             if (diff === 0) r.guestPrice.equal++;
             else {
                 r.guestPrice.different++;
@@ -136,24 +146,27 @@ export function compareOffers({ model, bindings, admin, store, vendure }) {
                 else r.guestPrice.lowerInShopware++;
                 r.guestPrice.maxAbsDiffMinor = Math.max(r.guestPrice.maxAbsDiffMinor, Math.abs(diff));
                 r.guestPrice.sumAbsDiffMinor += Math.abs(diff);
-                if (r.guestPrice.examples.length < 5) r.guestPrice.examples.push({ sku: o.sku, shopwareGuest: guest.minor, vendure: v.priceWithTax });
+                if (r.guestPrice.examples.length < 5) r.guestPrice.examples.push({ sku: o.sku, shopwareGuest: guest.minor, vendure: vendurePrice(v) });
             }
         }
     }
     return { r, guestTier1 };
 }
 
-/** Reads each product's quantity-1 rule prices and all rules from the Shopware database. */
-async function rulePriceRows(connect, source) {
+/**
+ * Reads each product's quantity-1 rule prices and all rules from the Shopware database.
+ * @param {'gross'|'net'} priceField The channel-mode price, the one the Store API shows a guest.
+ */
+async function rulePriceRows(connect, source, priceField) {
     const conn = await connect({
         host: source.host, port: source.port, user: source.user,
         password: source.password, database: source.database, charset: 'utf8mb4',
     });
     try {
         const [tier1Rows] = await conn.execute(
-            `SELECT LOWER(HEX(product_id)) product_id, LOWER(HEX(rule_id)) rule_id, JSON_EXTRACT(price, ?) gross
+            `SELECT LOWER(HEX(product_id)) product_id, LOWER(HEX(rule_id)) rule_id, JSON_EXTRACT(price, ?) price
              FROM product_price WHERE quantity_start = 1 AND product_version_id = UNHEX(?)`,
-            [`$.c${SHOPWARE.CURRENCY}.gross`, SHOPWARE.LIVE_VERSION],
+            [`$.c${SHOPWARE.CURRENCY}.${priceField}`, SHOPWARE.LIVE_VERSION],
         );
         const [rules] = await conn.execute('SELECT LOWER(HEX(id)) id, name, priority FROM rule');
         return { tier1Rows, rules };
@@ -172,7 +185,7 @@ export function ruleSelection(guestTier1, tier1Rows, rules) {
     const tier1ByProduct = new Map();
     for (const row of tier1Rows) {
         if (!tier1ByProduct.has(row.product_id)) tier1ByProduct.set(row.product_id, []);
-        tier1ByProduct.get(row.product_id).push({ ruleId: row.rule_id, minor: toMinorUnits(row.gross).minor });
+        tier1ByProduct.get(row.product_id).push({ ruleId: row.rule_id, minor: toMinorUnits(row.price).minor });
     }
     const order = (a, b) => ruleById.get(b).priority - ruleById.get(a).priority || (a < b ? -1 : a > b ? 1 : 0);
     const observed = new Map(); // productId -> winning ruleId
@@ -241,7 +254,7 @@ export async function oracle(config, snapshotDir, deps = {}) {
     log(`oracle: shopware admin ${admin.length}, store ${store.length}, vendure variants ${vendure.length}`);
     const { r, guestTier1 } = compareOffers({ model, bindings, admin, store, vendure });
 
-    const { tier1Rows, rules } = await rulePriceRows(deps.connect ?? mysql.createConnection, config.source);
+    const { tier1Rows, rules } = await rulePriceRows(deps.connect ?? mysql.createConnection, config.source, r.priceField);
     r.ruleSelection = ruleSelection(guestTier1, tier1Rows, rules);
     const sel = r.ruleSelection;
     log(`oracle rule selection: observed winner for ${sel.productsWithObservedWinner} products (${sel.ambiguousPriceMatch} ambiguous); priority DESC, id ASC predicts ${sel.predictionAgrees}, misses ${sel.predictionDisagrees}`);
@@ -256,7 +269,7 @@ export async function oracle(config, snapshotDir, deps = {}) {
         ...r,
     };
     await writeJson(path.join(snapshotDir, 'oracle-report.json'), result);
-    log(`oracle resolver: basePrice mismatches ${r.resolver.basePriceMismatch.length}, tax ${r.resolver.taxMismatch.length}, active ${r.resolver.activeMismatch.length}, missing in admin api ${r.resolver.missingInAdminApi.length}, missing in vendure ${r.resolver.missingInVendure.length}`);
+    log(`oracle resolver (${r.priceField} prices): basePrice mismatches ${r.resolver.basePriceMismatch.length}, tax ${r.resolver.taxMismatch.length}, active ${r.resolver.activeMismatch.length}, missing in admin api ${r.resolver.missingInAdminApi.length}, missing in vendure ${r.resolver.missingInVendure.length}`);
     log(`oracle names: mismatches ${r.names.mismatch.length}, not in store api ${r.names.notInStoreApi}`);
     log(`oracle guest price (${result.weekdayInShopTimezone}): comparable ${r.guestPrice.comparable}, equal ${r.guestPrice.equal}, different ${r.guestPrice.different} (higher in Shopware ${r.guestPrice.higherInShopware}, lower ${r.guestPrice.lowerInShopware}), max diff ${r.guestPrice.maxAbsDiffMinor}`);
     return result;
