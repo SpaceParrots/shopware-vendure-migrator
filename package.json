@@ -5,15 +5,17 @@
   "type": "module",
   "description": "Catalogue migration from Shopware 6 to Vendure 3. Experimental, local use.",
   "scripts": {
-    "extract": "node src/cli.mjs extract",
-    "transform": "node src/cli.mjs transform",
-    "load": "node src/cli.mjs load",
-    "verify": "node src/cli.mjs verify",
-    "all": "node src/cli.mjs all",
+    "help": "node src/cli.mjs --help",
+    "extract": "node --env-file-if-exists=.env src/cli.mjs extract",
+    "transform": "node --env-file-if-exists=.env src/cli.mjs transform",
+    "load": "node --env-file-if-exists=.env src/cli.mjs load",
+    "verify": "node --env-file-if-exists=.env src/cli.mjs verify",
+    "oracle": "node --env-file-if-exists=.env src/cli.mjs oracle",
+    "all": "node --env-file-if-exists=.env src/cli.mjs all",
     "test": "node --test"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.9"
   },
   "dependencies": {
     "mysql2": "^3.24.4"
