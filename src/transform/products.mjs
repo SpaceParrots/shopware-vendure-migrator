@@ -201,7 +201,7 @@ export function buildFamilies(raw, ctx) {
         decisions: [
             { topic: 'variants', text: 'A Shopware parent with children becomes one Vendure Product; only the children become ProductVariants. The parent row itself is never turned into a buyable variant. A product without children becomes a Product with exactly one variant.' },
             { topic: 'variant names', text: 'Variants whose name is inherited from the parent get the option labels appended (e.g. "Hoodie Red / M"), because Vendure lists variants by name. Variants with their own name keep it unchanged.' },
-            { topic: 'translations', text: 'Translated values are resolved in Shopware DAL order (child language chain, then parent language chain, the chain ending in the system language). A translation is only written to Vendure when the value was authored in that language; otherwise Vendure falls back to the default language, which yields the same text Shopware shows.' },
+            { topic: 'translations', text: 'Translated values are resolved in Shopware DAL order, language-major: for each language of the chain (requested, its parent language, the system language) first the variant\'s own translation, then the parent product\'s, then the next language. A translation is only written to Vendure when the value was authored in that language; otherwise Vendure falls back to the default language, which yields the same text Shopware shows.' },
             { topic: 'stock', text: 'stockOnHand is product.stock (physical). available_stock is not used; open orders are not migrated, so there is nothing to allocate against in Vendure yet.' },
         ],
     };

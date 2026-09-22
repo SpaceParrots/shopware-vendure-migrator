@@ -92,6 +92,15 @@ describe('variant names', () => {
         assert.equal(result.families[0].kind, 'family');
     });
 
+    test('a variant with only an English name shows the parent German name in German, with option labels', () => {
+        const r = build(snapshot({
+            products: [product('p'), variant('v', 'p')],
+            product_translations: [tr('p', SYS, 'Hoodie'), tr('p', DE, 'Kapuzenpulli'), tr('v', SYS, 'Hoodie Blue')],
+            product_options: [{ product_id: 'v', option_id: 'red' }],
+        }));
+        assert.deepEqual(offerOf(r, 'v').names, { en: 'Hoodie Blue', de: 'Kapuzenpulli Rot' });
+    });
+
     test('a product without variants is one offer named like the product', () => {
         const simple = build(snapshot({ products: [product('s')], product_translations: [tr('s', SYS, 'Mug')] }));
         assert.equal(simple.families[0].kind, 'simple');

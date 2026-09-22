@@ -133,11 +133,26 @@ describe('resolveTranslated', () => {
         assert.equal(result.ch.authoredIn, 'en');
     });
 
-    test('the child product exhausts its whole language chain before the parent product', () => {
-        // The variant has only an English name, the parent product a German one. Shopware shows
-        // the variant's English name in German, not the parent's German name.
+    test('the fallback is language-major: the parent translation in a language beats the child in the next language', () => {
+        // Shopware's COALESCE chain (EntityDefinitionQueryHelper::buildTranslationChain) is, per
+        // language from specific to system: own translation, then the parent's. The variant has only
+        // an English name, the parent a German one, so German shows the parent's German name.
         const result = resolve(rows([SYSTEM, 'Variant']), rows([SYSTEM, 'Parent'], ['de-de', 'Eltern']));
-        assert.deepEqual(result.de, { value: 'Variant', authoredIn: 'en', owner: 'own' });
+        assert.deepEqual(result.de, { value: 'Eltern', authoredIn: 'de', owner: 'parent' });
+        assert.deepEqual(result.en, { value: 'Variant', authoredIn: 'en', owner: 'own' });
+    });
+
+    test('language-major also holds along a child language chain', () => {
+        // de-CH -> de-DE -> system. The variant has de-DE, the parent de-CH: in de-CH the parent's
+        // de-CH row comes before the variant's de-DE row.
+        const result = resolve(rows([SYSTEM, 'Variant'], ['de-de', 'Variante']), rows([SYSTEM, 'Parent'], ['de-ch', 'Eltern CH']));
+        assert.deepEqual(result.ch, { value: 'Eltern CH', authoredIn: 'ch', owner: 'parent' });
+        assert.deepEqual(result.de, { value: 'Variante', authoredIn: 'de', owner: 'own' });
+    });
+
+    test('the child translation wins over the parent translation in the same language', () => {
+        const result = resolve(rows([SYSTEM, 'Variant'], ['de-de', 'Variante']), rows([SYSTEM, 'Parent'], ['de-de', 'Eltern']));
+        assert.deepEqual(result.de, { value: 'Variante', authoredIn: 'de', owner: 'own' });
     });
 
     test('a child product without any translation takes the parent product value', () => {

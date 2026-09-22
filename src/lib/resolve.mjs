@@ -30,28 +30,44 @@ export function languageChain(langById, langId, systemLanguageId = SHOPWARE.LANG
 }
 
 /**
- * Effective translated value exactly as Shopware's DAL resolves it for inherited entities:
- * the child's whole language chain first, then the parent's. Returns the value and the
- * language it was authored in, so the loader only writes translations that really exist
- * in that language and lets Vendure's own default-language fallback do the rest.
+ * Effective translated value exactly as Shopware's DAL resolves it for inherited entities. The
+ * fallback is language-major: for each language of the context chain, from the most specific to
+ * the system language, the entity's own translation first, then the parent's, then the next
+ * language (EntityDefinitionQueryHelper::buildTranslationChain). So a variant with only an
+ * English name shows its parent's German name in German.
  *
- * `languages` are `{ sourceId, parentId, code }`; several Shopware languages may share a code,
- * and the first one in list order wins.
+ * Returns the value and the language it was authored in, so the loader only writes translations
+ * that really exist in that language and lets Vendure's own default-language fallback do the rest.
+ *
+ * @param {Array<{ sourceId: string, parentId: string|null, code: string }>} languages Several
+ *   Shopware languages may share a code; the first one in list order wins.
+ * @param {Map<string, object>|null|undefined} ownByLang The entity's translation rows by language id.
+ * @param {Map<string, object>|null|undefined} parentByLang The parent entity's rows, or nothing.
+ * @param {string} field Column to read. NULL and '' count as not translated.
+ * @param {string} [systemLanguageId]
+ * @returns {Record<string, { value: unknown, authoredIn: string, owner: 'own'|'parent' }>} Languages
+ *   without a value anywhere are left out.
+ * @throws {TypeError} When a language's parent is not in `languages`.
  */
 export function resolveTranslated(languages, ownByLang, parentByLang, field, systemLanguageId = SHOPWARE.LANGUAGE_SYSTEM) {
     const langById = new Map(languages.map(l => [l.sourceId, l]));
-    const out = {};
-    for (const lang of languages) {
-        for (const [owner, byLang] of [['own', ownByLang], ['parent', parentByLang]]) {
-            if (out[lang.code]) break;
-            for (const chainLang of languageChain(langById, lang.sourceId, systemLanguageId)) {
+    const sources = [['own', ownByLang], ['parent', parentByLang]];
+    const resolveOne = lang => {
+        for (const chainLang of languageChain(langById, lang.sourceId, systemLanguageId)) {
+            for (const [owner, byLang] of sources) {
                 const value = byLang?.get(chainLang)?.[field];
                 if (value !== null && value !== undefined && value !== '') {
-                    out[lang.code] = { value, authoredIn: langById.get(chainLang).code, owner };
-                    break;
+                    return { value, authoredIn: langById.get(chainLang).code, owner };
                 }
             }
         }
+        return undefined;
+    };
+    const out = {};
+    for (const lang of languages) {
+        if (lang.code in out) continue;
+        const hit = resolveOne(lang);
+        if (hit) out[lang.code] = hit;
     }
     return out;
 }
