@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { SHOPWARE } from './config.mjs';
+import { authoredOnly, byLangMap, groupTaxZones, inherit, inheritRows, resolveTranslated } from './lib/resolve.mjs';
 import { groupBy, log, readJson, slugify, toMinorUnits, uniqueCoder, writeJson } from './lib/util.mjs';
 
 // Shopware locale -> Vendure LanguageCode. Base codes on purpose: one storefront per language.
@@ -33,43 +34,9 @@ export async function transform(config, snapshotDir) {
     const defaultLanguageCode = systemLanguage.code;
     decide('languages', `Shopware system language ${systemLanguage.locale} becomes Vendure default language "${defaultLanguageCode}". Locales map to base codes (${languages.map(l => `${l.locale}->${l.code}`).join(', ')}).`);
 
-    // Shopware's language chain for a context: requested, its parent, then system language.
-    const chainFor = langId => {
-        const l = langById.get(langId);
-        return [...new Set([langId, l.parentId, SHOPWARE.LANGUAGE_SYSTEM].filter(Boolean))];
-    };
-
-    /**
-     * Effective translated value exactly as Shopware's DAL resolves it for inherited entities:
-     * the child's whole language chain first, then the parent's. Returns the value and the
-     * language it was authored in, so the loader only writes translations that really exist
-     * in that language and lets Vendure's own default-language fallback do the rest.
-     */
-    const resolveTranslated = (ownByLang, parentByLang, field) => {
-        const out = {};
-        for (const lang of languages) {
-            for (const [owner, byLang] of [['own', ownByLang], ['parent', parentByLang]]) {
-                if (out[lang.code]) break;
-                for (const chainLang of chainFor(lang.sourceId)) {
-                    const value = byLang?.get(chainLang)?.[field];
-                    if (value !== null && value !== undefined && value !== '') {
-                        out[lang.code] = { value, authoredIn: langById.get(chainLang).code, owner };
-                        break;
-                    }
-                }
-            }
-        }
-        return out;
-    };
-    /** Keeps only values authored in their own language; the default language is always kept. */
-    const authoredOnly = resolved => {
-        const out = {};
-        for (const [code, r] of Object.entries(resolved)) {
-            if (r.authoredIn === code || code === defaultLanguageCode) out[code] = r.value;
-        }
-        return out;
-    };
-    const byLangMap = rows => new Map(rows.map(r => [r.language_id, r]));
+    // Bound to this shop's languages; the rules themselves live in lib/resolve.mjs.
+    const translated = (ownByLang, parentByLang, field) => resolveTranslated(languages, ownByLang, parentByLang, field);
+    const authored = resolved => authoredOnly(resolved, defaultLanguageCode);
 
     // ----- sales channel, countries, tax ------------------------------------------------
     const storefront = raw.sales_channels.find(sc => sc.type_id === SHOPWARE.SALES_CHANNEL_TYPE_STOREFRONT);
@@ -97,25 +64,7 @@ export async function transform(config, snapshotDir) {
     if (nonCountryRules.length) {
         gaps.taxRulesNotCountryWide = nonCountryRules.length;
     }
-    // Rate per (country, tax): the tax_rule if present, otherwise the tax's default rate.
-    const ruleRate = new Map(
-        raw.tax_rules.filter(r => r.type === 'entire_country').map(r => [`${r.country_id}|${r.tax_id}`, Number(r.tax_rate)]),
-    );
-    const zoneByTuple = new Map();
-    for (const c of countries) {
-        const rates = taxCategories.map(t => ruleRate.get(`${c.sourceId}|${t.sourceId}`) ?? t.defaultRate);
-        const key = rates.join('/');
-        if (!zoneByTuple.has(key)) zoneByTuple.set(key, { key, rates, countryCodes: [] });
-        zoneByTuple.get(key).countryCodes.push(c.code);
-    }
-    const defaultTuple = taxCategories.map(t => t.defaultRate).join('/');
-    const taxZones = [...zoneByTuple.values()].map(z => ({
-        key: z.key,
-        name: `Tax ${z.key} (${z.countryCodes.length} ${z.countryCodes.length === 1 ? 'country' : 'countries'})`,
-        countryCodes: z.countryCodes.sort(),
-        rates: Object.fromEntries(taxCategories.map((t, i) => [t.sourceId, z.rates[i]])),
-        isDefault: z.key === defaultTuple,
-    }));
+    const { taxZones, defaultTuple } = groupTaxZones(countries, taxCategories, raw.tax_rules);
     decide('tax', `Shopware applies a tax's default rate everywhere except countries with a tax_rule. Vendure rates belong to zones, so countries are grouped by their rate tuple (${taxCategories.map(t => t.name).join(' / ')}) into ${taxZones.length} tax zones. The zone matching the default rates (${defaultTuple}) is the channel's default tax zone.`);
 
     // ----- products: effective values -------------------------------------------------------
@@ -145,20 +94,6 @@ export async function transform(config, snapshotDir) {
 
     // Manufacturers.
     const manufacturerNames = groupBy(raw.manufacturer_translations, 'manufacturer_id');
-
-    /** Scalar inheritance: own value unless NULL, then parent's. Records provenance. */
-    const inherit = (own, parent, field) => {
-        if (own[field] !== null && own[field] !== undefined) return { value: own[field], from: 'own' };
-        if (parent && parent[field] !== null && parent[field] !== undefined) return { value: parent[field], from: 'parent' };
-        return { value: null, from: 'none' };
-    };
-    /** Association inheritance: own rows if the child has any, otherwise the parent's. */
-    const inheritRows = (index, own, parent) => {
-        const mine = index.get(own.id) ?? [];
-        if (mine.length || !parent) return { rows: mine, from: mine.length ? 'own' : 'none' };
-        const theirs = index.get(parent.id) ?? [];
-        return { rows: theirs, from: theirs.length ? 'parent' : 'none' };
-    };
 
     const priceKey = `c${SHOPWARE.CURRENCY}`;
     const problems = { unpriced: [], untaxed: [], subCentPrice: [], nonDefaultCurrencyOnly: [] };
@@ -225,12 +160,12 @@ export async function transform(config, snapshotDir) {
         const children = childrenOf.get(row.id) ?? [];
         const isFamily = children.length > 0;
         const ownTranslations = byLangMap(translationsOf.get(row.id) ?? []);
-        const names = resolveTranslated(ownTranslations, null, 'name');
-        const descriptions = resolveTranslated(ownTranslations, null, 'description');
+        const names = translated(ownTranslations, null, 'name');
+        const descriptions = translated(ownTranslations, null, 'description');
         if ((optionsOf.get(row.id) ?? []).length) optionUsage.parentsWithOptionRows++;
 
         const slugs = {};
-        for (const code of Object.keys(authoredOnly(names))) {
+        for (const code of Object.keys(authored(names))) {
             const seo = productSlugs.get(`${row.id}|${code}`);
             slugs[code] = seo ? slugify(seo) : slugify(names[code].value);
             if (seo) redirects.push({ type: 'product', sourceId: row.id, language: code, from: `/${seo}`, toSlug: slugs[code] });
@@ -242,8 +177,8 @@ export async function transform(config, snapshotDir) {
             sourceId: row.id,
             kind: isFamily ? 'family' : 'simple',
             sku: row.product_number,
-            names: authoredOnly(names),
-            descriptions: authoredOnly(descriptions),
+            names: authored(names),
+            descriptions: authored(descriptions),
             slugs,
             enabled: Boolean(row.active),
             propertyOptionIds: (propertiesOf.get(row.id) ?? []).map(p => p.option_id),
@@ -261,7 +196,7 @@ export async function transform(config, snapshotDir) {
         } else {
             for (const child of children) {
                 const offer = offerFromRow(child, row);
-                const childNames = resolveTranslated(byLangMap(translationsOf.get(child.id) ?? []), ownTranslations, 'name');
+                const childNames = translated(byLangMap(translationsOf.get(child.id) ?? []), ownTranslations, 'name');
                 const variantNames = {};
                 for (const [code, r] of Object.entries(childNames)) {
                     if (r.authoredIn !== code && code !== defaultLanguageCode) continue;
@@ -393,8 +328,8 @@ export async function transform(config, snapshotDir) {
             continue;
         }
         const own = byLangMap(categoryNames.get(c.id) ?? []);
-        const names = authoredOnly(resolveTranslated(own, null, 'name'));
-        const descriptions = authoredOnly(resolveTranslated(own, null, 'description'));
+        const names = authored(translated(own, null, 'name'));
+        const descriptions = authored(translated(own, null, 'description'));
         const slugs = {};
         for (const code of Object.keys(names)) {
             const seo = categorySlugs.get(`${c.id}|${code}`);
