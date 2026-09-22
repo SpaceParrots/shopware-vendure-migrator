@@ -122,7 +122,11 @@ export function toCsv(header, rows) {
     return [header, ...rows].map(r => r.map(field).join(',')).join('\r\n') + '\r\n';
 }
 
-/** Prints a timestamped line to stdout. */
+/**
+ * Prints a line to stdout, prefixed with the UTC time of day.
+ * @param {...unknown} args Passed to console.log.
+ * @returns {void} Never throws.
+ */
 export function log(...args) {
     console.log(new Date().toISOString().slice(11, 19), ...args);
 }

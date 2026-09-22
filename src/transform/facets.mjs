@@ -1,16 +1,35 @@
 // Property groups and manufacturers -> Vendure facets.
 import { groupBy, slugify, uniqueCoder } from '../lib/util.mjs';
 
+// Name of the manufacturer facet per Vendure language code. Languages without an entry get no name
+// of their own and fall back to the default language in Vendure.
+const MANUFACTURER_LABELS = { en: 'Manufacturer', de: 'Hersteller' };
+
+/**
+ * Names of the manufacturer facet for the shop's languages: every code with a known label, and
+ * always the default language, with its own label or the English one.
+ * @param {string[]} languageCodes The model's language codes.
+ * @param {string} defaultLanguageCode
+ * @returns {Record<string, string>} Never throws.
+ */
+export function manufacturerFacetNames(languageCodes, defaultLanguageCode) {
+    return Object.fromEntries(
+        languageCodes
+            .filter(code => MANUFACTURER_LABELS[code] || code === defaultLanguageCode)
+            .map(code => [code, MANUFACTURER_LABELS[code] ?? MANUFACTURER_LABELS.en]),
+    );
+}
+
 /**
  * One facet per property group (its options as values) plus one "manufacturer" facet whose values
  * are the manufacturers some product uses.
  * @param {object} raw Snapshot tables (property_groups, property_group_translations,
  *   property_group_options, property_group_option_translations, manufacturers,
  *   manufacturer_translations, products).
- * @param {{ defaultLanguageCode: string, namesOf: Function }} ctx
+ * @param {{ defaultLanguageCode: string, languageCodes: string[], namesOf: Function }} ctx
  * @returns {{ facets: object[], decisions: Array<{ topic: string, text: string }> }} Never throws.
  */
-export function buildFacets(raw, { defaultLanguageCode, namesOf }) {
+export function buildFacets(raw, { defaultLanguageCode, languageCodes, namesOf }) {
     const groupNames = groupBy(raw.property_group_translations, 'group_id');
     const optionNames = groupBy(raw.property_group_option_translations, 'option_id');
     const manufacturerNames = groupBy(raw.manufacturer_translations, 'manufacturer_id');
@@ -38,7 +57,7 @@ export function buildFacets(raw, { defaultLanguageCode, namesOf }) {
         sourceId: 'manufacturer',
         kind: 'manufacturer',
         code: facetCodes('manufacturer'),
-        names: { en: 'Manufacturer', de: 'Hersteller' },
+        names: manufacturerFacetNames(languageCodes, defaultLanguageCode),
         values: raw.manufacturers
             .filter(m => usedManufacturers.has(m.id))
             .map(m => {
