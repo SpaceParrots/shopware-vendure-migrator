@@ -1,5 +1,5 @@
 // Shopware price JSON -> the gross and net price of an offer in minor units.
-import { toMinorUnits } from '../lib/util.mjs';
+import { roundHalfUpToMinorUnits, toMinorUnits } from '../lib/util.mjs';
 
 const DEFAULT_DECIMALS = 2;
 
@@ -27,6 +27,12 @@ export function currencyDecimals(currency) {
 /**
  * Gross and net price of one offer from Shopware's price JSON (already inherited from the parent
  * when the variant has none). Both come from the default-currency entry `c<currencyId>`.
+ *
+ * Rounding policy: when the entry is `linked: true`, Shopware derived one of the two prices from
+ * the other through the tax rate and stored it at full float precision. Such a derived value with
+ * more decimals than the currency is rounded half-up to the currency decimals and flagged in
+ * `roundedFromLinked`. When `linked: false`, both prices were entered by hand, and a sub-cent value
+ * is refused as before.
  * @param {unknown} priceValue The price column: JSON text, a parsed object, or null.
  * @param {{ currencyId: string, decimals: number, pricesIncludeTax: boolean }} options
  *   pricesIncludeTax picks the price load sends (gross when true, net when false); only a missing
@@ -35,12 +41,13 @@ export function currencyDecimals(currency) {
  *   priceGrossMinor: number|null,
  *   priceNetMinor: number|null,
  *   problem: null | { kind: 'unpriced'|'invalidPriceJson'|'nonDefaultCurrencyOnly'|'subCentPrice'|'unconvertiblePrice', field?: string, value?: unknown, reason: string },
+ *   roundedFromLinked: { gross: boolean, net: boolean },
  *   hasListPrice: boolean,
  *   otherCurrencyKeys: string[],
  * }} null prices mean missing or not convertible. Never throws.
  */
 export function resolvePrice(priceValue, { currencyId, decimals, pricesIncludeTax }) {
-    const none = { priceGrossMinor: null, priceNetMinor: null, hasListPrice: false, otherCurrencyKeys: [] };
+    const none = { priceGrossMinor: null, priceNetMinor: null, roundedFromLinked: { gross: false, net: false }, hasListPrice: false, otherCurrencyKeys: [] };
     let json = priceValue;
     if (typeof priceValue === 'string') {
         try {
@@ -58,12 +65,19 @@ export function resolvePrice(priceValue, { currencyId, decimals, pricesIncludeTa
     const entry = json[key];
     if (!entry) return { ...none, hasListPrice, otherCurrencyKeys, problem: { kind: 'nonDefaultCurrencyOnly', reason: 'no price in the default currency' } };
 
-    const gross = toMinorUnits(entry.gross, decimals);
-    const net = toMinorUnits(entry.net, decimals);
+    const linked = entry.linked === true;
+    const convert = value => {
+        const exact = toMinorUnits(value, decimals);
+        if (exact.ok || !linked || exact.reason !== 'sub-minor-unit precision') return { ...exact, rounded: false };
+        return { ...roundHalfUpToMinorUnits(value, decimals), rounded: true };
+    };
+    const gross = convert(entry.gross);
+    const net = convert(entry.net);
     const [field, chosen] = pricesIncludeTax ? ['gross', gross] : ['net', net];
     return {
         priceGrossMinor: gross.ok ? gross.minor : null,
         priceNetMinor: net.ok ? net.minor : null,
+        roundedFromLinked: { gross: gross.ok && gross.rounded, net: net.ok && net.rounded },
         hasListPrice,
         otherCurrencyKeys,
         problem: chosen.ok

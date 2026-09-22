@@ -137,7 +137,7 @@ export function variantNames(resolvedNames, optionSourceIds, optionLabel, author
  *   families: object[],
  *   provenance: Record<string, number>,
  *   problems: Record<string, unknown[]>,
- *   priceStats: { offersWithListPrice: number, offersWithOtherCurrencies: number, otherCurrencyKeys: Record<string, number>, netNotConvertible: number, grossNotConvertible: number },
+ *   priceStats: { offersWithListPrice: number, offersWithOtherCurrencies: number, otherCurrencyKeys: Record<string, number>, netNotConvertible: number, grossNotConvertible: number, netRoundedFromLinked: number, grossRoundedFromLinked: number },
  *   optionUsage: { parentsWithOptionRows: number },
  *   familyIssues: Array<{ family: string, sku: string, issue: string }>,
  *   decisions: Array<{ topic: string, text: string }>,
@@ -224,6 +224,8 @@ export function buildFamilies(raw, ctx) {
         otherCurrencyKeys,
         grossNotConvertible: resolved.filter(r => r.price.priceGrossMinor === null).length,
         netNotConvertible: resolved.filter(r => r.price.priceNetMinor === null).length,
+        grossRoundedFromLinked: resolved.filter(r => r.price.roundedFromLinked.gross).length,
+        netRoundedFromLinked: resolved.filter(r => r.price.roundedFromLinked.net).length,
     };
 
     return {
@@ -237,7 +239,7 @@ export function buildFamilies(raw, ctx) {
             { topic: 'variants', text: 'A Shopware parent with children becomes one Vendure Product; only the children become ProductVariants. The parent row itself is never turned into a buyable variant. A product without children becomes a Product with exactly one variant.' },
             { topic: 'variant names', text: 'Variants whose name is inherited from the parent get the option labels appended (e.g. "Hoodie Red / M"), because Vendure lists variants by name. Variants with their own name keep it unchanged.' },
             { topic: 'translations', text: 'Translated values are resolved in Shopware DAL order, language-major: for each language of the chain (requested, its parent language, the system language) first the variant\'s own translation, then the parent product\'s, then the next language. A translation is only written to Vendure when the value was authored in that language; otherwise Vendure falls back to the default language, which yields the same text Shopware shows.' },
-            { topic: 'prices', text: `Every offer carries priceGrossMinor and priceNetMinor from the default-currency entry of Shopware's price JSON, in minor units with ${pricing.decimals} decimals (${pricing.decimalsSource === 'item_rounding' ? 'currency.item_rounding' : 'default, item_rounding has none'}). Load sends the gross price when the storefront customer group shows gross prices (pricesIncludeTax), else the net price; a value with more decimals than the currency is never rounded, it becomes null and the offer is listed in gaps.problems.refusedOffers.` },
+            { topic: 'prices', text: `Every offer carries priceGrossMinor and priceNetMinor from the default-currency entry of Shopware's price JSON, in minor units with ${pricing.decimals} decimals (${pricing.decimalsSource === 'item_rounding' ? 'currency.item_rounding' : 'default, item_rounding has none'}). Load sends the gross price when the storefront customer group shows gross prices (pricesIncludeTax), else the net price; when the price is linked (Shopware derived one price from the other through the tax rate), a derived value with more decimals than the currency is rounded half-up to the currency decimals and counted in gaps.prices; when it is not linked, such a value is never rounded, it becomes null and, if it is the price load sends, the offer is listed in gaps.problems.refusedOffers.` },
             { topic: 'stock', text: 'stockOnHand is product.stock (physical). available_stock is not used; open orders are not migrated, so there is nothing to allocate against in Vendure yet.' },
         ],
     };

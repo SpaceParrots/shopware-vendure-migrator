@@ -11,7 +11,7 @@ const DE = 'lang-de';
 const SF = 'sf';
 const CUR = `c${SHOPWARE.CURRENCY}`;
 
-const price = (gross, net = gross) => JSON.stringify({ [CUR]: { gross, net, linked: true, currencyId: SHOPWARE.CURRENCY } });
+const price = (gross, net = gross, linked = true) => JSON.stringify({ [CUR]: { gross, net, linked, currencyId: SHOPWARE.CURRENCY } });
 const product = (id, extra = {}) => ({
     id,
     parent_id: null,
@@ -114,6 +114,7 @@ describe('prices', () => {
         products: [
             product('gross-shop', { price: price('11.90', '10') }),
             product('derived-net', { price: price(826.77, 694.7647058823529) }),
+            product('unlinked-net', { price: price(826.77, 694.7647058823529, false) }),
             product('no-price', { price: null }),
             product('p'),
             variant('v', 'p'),
@@ -123,8 +124,10 @@ describe('prices', () => {
     test('every offer keeps both gross and net in minor units, or null when not convertible', () => {
         const r = build(raw);
         assert.deepEqual([offerOf(r, 'gross-shop').priceGrossMinor, offerOf(r, 'gross-shop').priceNetMinor], [1190, 1000]);
-        // Shopware stores a net price derived from gross at full float precision; it is not a price.
-        assert.deepEqual([offerOf(r, 'derived-net').priceGrossMinor, offerOf(r, 'derived-net').priceNetMinor], [82677, null]);
+        // Shopware stores a net price derived from gross (linked) at full float precision; it is
+        // rounded half-up. The same value entered by hand (unlinked) is not a price.
+        assert.deepEqual([offerOf(r, 'derived-net').priceGrossMinor, offerOf(r, 'derived-net').priceNetMinor], [82677, 69476]);
+        assert.deepEqual([offerOf(r, 'unlinked-net').priceGrossMinor, offerOf(r, 'unlinked-net').priceNetMinor], [82677, null]);
         assert.equal(offerOf(r, 'v').priceGrossMinor, 1000, 'variant inherits the parent price');
     });
 
@@ -135,13 +138,15 @@ describe('prices', () => {
         assert.deepEqual(problems.subCentPrice, []);
     });
 
-    test('a net-price shop refuses offers whose net price is not convertible and names the field', () => {
-        const { problems } = build(raw, { pricesIncludeTax: false });
+    test('a net-price shop refuses offers whose unlinked net price is not convertible and names the field', () => {
+        const { problems, priceStats } = build(raw, { pricesIncludeTax: false });
         assert.deepEqual(problems.refusedOffers.map(o => [o.sku, o.reasons]), [
-            ['DERIVED-NET', ['net price sub-minor-unit precision']],
+            ['UNLINKED-NET', ['net price sub-minor-unit precision']],
             ['NO-PRICE', ['no price']],
         ]);
-        assert.deepEqual(problems.subCentPrice, [{ sku: 'DERIVED-NET', field: 'net', value: 694.7647058823529, reason: 'net price sub-minor-unit precision' }]);
+        assert.deepEqual(problems.subCentPrice, [{ sku: 'UNLINKED-NET', field: 'net', value: 694.7647058823529, reason: 'net price sub-minor-unit precision' }]);
+        assert.equal(priceStats.netRoundedFromLinked, 1, 'DERIVED-NET is rounded and counted, not refused');
+        assert.equal(priceStats.grossRoundedFromLinked, 0);
     });
 
     test('an offer without tax after inheritance is refused, with the reason', () => {
@@ -164,7 +169,7 @@ describe('prices', () => {
             [usd]: { gross: 11, net: 9.24, linked: true },
         });
         const r = build(snapshot({ products: [product('a', { price: withExtras }), product('b')] }));
-        assert.deepEqual(r.priceStats, { offersWithListPrice: 1, offersWithOtherCurrencies: 1, otherCurrencyKeys: { [usd]: 1 }, grossNotConvertible: 0, netNotConvertible: 0 });
+        assert.deepEqual(r.priceStats, { offersWithListPrice: 1, offersWithOtherCurrencies: 1, otherCurrencyKeys: { [usd]: 1 }, grossNotConvertible: 0, netNotConvertible: 0, grossRoundedFromLinked: 0, netRoundedFromLinked: 0 });
     });
 });
 

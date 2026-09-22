@@ -91,6 +91,26 @@ export function toMinorUnits(amount, decimals = 2) {
 }
 
 /**
+ * Rounds a decimal amount half-up to minor units: a 5 in the first dropped digit rounds away from
+ * zero, like PHP's round(). The amount is first written with six digits beyond the currency, so
+ * binary float noise (1.005 is stored as 1.00499999...) does not decide the rounding.
+ * @param {unknown} amount A number or a decimal string.
+ * @param {number} [decimals=2] Minor-unit digits of the currency.
+ * @returns {{ ok: true, minor: number } | { ok: false, reason: string, value: unknown }}
+ *   reason is 'missing', 'not a string or number' or 'not a number'. Amounts too large for
+ *   toFixed (1e21 and up) are integers in float and never reach the rounding.
+ * @throws {RangeError} When `decimals` is not a non-negative integer (a programming error).
+ */
+export function roundHalfUpToMinorUnits(amount, decimals = 2) {
+    const exact = toMinorUnits(amount, decimals);
+    if (exact.ok || exact.reason !== 'sub-minor-unit precision') return exact;
+    const value = Number(amount);
+    const [int, frac] = Math.abs(value).toFixed(decimals + 6).split('.');
+    const minor = Number(BigInt(int + frac.slice(0, decimals)) + (frac[decimals] >= '5' ? 1n : 0n));
+    return { ok: true, minor: value < 0 ? -minor : minor };
+}
+
+/**
  * Groups rows by a column or a key function, keeping the input order inside each group.
  * @template T
  * @param {T[]} rows

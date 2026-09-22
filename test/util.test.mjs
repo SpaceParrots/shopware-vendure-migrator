@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { slugify, toCsv, toMinorUnits } from '../src/lib/util.mjs';
+import { roundHalfUpToMinorUnits, slugify, toCsv, toMinorUnits } from '../src/lib/util.mjs';
 
 describe('toMinorUnits', () => {
     test('converts decimal strings and numbers to cents', () => {
@@ -58,6 +58,32 @@ describe('toMinorUnits', () => {
         assert.throws(() => toMinorUnits('1', -1), RangeError);
         assert.throws(() => toMinorUnits('1', 1.5), RangeError);
         assert.throws(() => toMinorUnits('1', '2'), RangeError);
+    });
+});
+
+describe('roundHalfUpToMinorUnits', () => {
+    test('keeps exact values and rounds sub-cent values half-up', () => {
+        assert.deepEqual(roundHalfUpToMinorUnits('19.99'), { ok: true, minor: 1999 });
+        assert.deepEqual(roundHalfUpToMinorUnits(694.7647058823529), { ok: true, minor: 69476 });
+        assert.deepEqual(roundHalfUpToMinorUnits('0.125'), { ok: true, minor: 13 });
+        assert.deepEqual(roundHalfUpToMinorUnits('0.12499'), { ok: true, minor: 12 });
+    });
+
+    test('rounds on the decimal value, not the binary float', () => {
+        // 1.005 is 1.00499999999999989... in IEEE 754; Math.round(1.005 * 100) gives 100.
+        assert.deepEqual(roundHalfUpToMinorUnits(1.005), { ok: true, minor: 101 });
+        assert.deepEqual(roundHalfUpToMinorUnits(8.675), { ok: true, minor: 868 });
+    });
+
+    test('rounds a negative half away from zero and uses the currency decimals', () => {
+        assert.deepEqual(roundHalfUpToMinorUnits('-0.125'), { ok: true, minor: -13 });
+        assert.deepEqual(roundHalfUpToMinorUnits('2.5', 0), { ok: true, minor: 3 });
+        assert.deepEqual(roundHalfUpToMinorUnits('1.2345', 3), { ok: true, minor: 1235 });
+    });
+
+    test('still refuses missing and non-numeric values', () => {
+        assert.equal(roundHalfUpToMinorUnits(null).reason, 'missing');
+        assert.equal(roundHalfUpToMinorUnits('abc').reason, 'not a number');
     });
 });
 

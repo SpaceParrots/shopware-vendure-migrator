@@ -131,5 +131,6 @@ export async function transform(config, snapshotDir) {
     log(`transform: ${e.products} products, ${e.variants} variants (${e.families} families, ${e.simpleProducts} simple), ${e.collections} collections, ${e.assets} assets, ${e.taxZones} tax zones`);
     log(`transform: provenance ${JSON.stringify(provenance)}`);
     log(`transform: problems unpriced=${p.unpriced.length} untaxed=${p.untaxed.length} subCent=${p.subCentPrice.length} refusedOffers=${p.refusedOffers.length} familyIssues=${p.familyIssues.length}`);
+    log(`transform: prices rounded from linked net=${gaps.prices.netRoundedFromLinked} gross=${gaps.prices.grossRoundedFromLinked}`);
     return model;
 }

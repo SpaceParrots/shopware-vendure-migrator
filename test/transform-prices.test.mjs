@@ -20,11 +20,49 @@ describe('resolvePrice', () => {
     });
 
     test('only the price load sends can be a problem', () => {
-        const derivedNet = json(826.77, 694.7647058823529);
+        const derivedNet = json(826.77, 694.7647058823529, { linked: false });
         assert.equal(resolvePrice(derivedNet, opts(true)).problem, null);
         assert.deepEqual(resolvePrice(derivedNet, opts(false)).problem, {
             kind: 'subCentPrice', field: 'net', value: 694.7647058823529, reason: 'net price sub-minor-unit precision',
         });
+    });
+
+    test('linked: a sub-cent net derived from gross is rounded half-up and flagged', () => {
+        const r = resolvePrice(json(826.77, 694.7647058823529, { linked: true }), opts(false));
+        assert.equal(r.priceGrossMinor, 82677);
+        assert.equal(r.priceNetMinor, 69476);
+        assert.equal(r.problem, null);
+        assert.deepEqual(r.roundedFromLinked, { gross: false, net: true });
+        // Half-up at the boundary, and float noise does not round 1.005 down.
+        assert.equal(resolvePrice(json(1.19, 0.125, { linked: true }), opts(false)).priceNetMinor, 13);
+        assert.equal(resolvePrice(json(1.19, 1.005, { linked: true }), opts(false)).priceNetMinor, 101);
+        assert.equal(resolvePrice(json(1.19, 1.00499, { linked: true }), opts(false)).priceNetMinor, 100);
+    });
+
+    test('linked: a sub-cent gross derived from net is rounded half-up and flagged', () => {
+        const r = resolvePrice(json(12.3165, 10.35, { linked: true }), opts(true));
+        assert.equal(r.priceGrossMinor, 1232);
+        assert.equal(r.priceNetMinor, 1035);
+        assert.equal(r.problem, null);
+        assert.deepEqual(r.roundedFromLinked, { gross: true, net: false });
+    });
+
+    test('unlinked: a sub-cent net or gross is refused, never rounded', () => {
+        const net = resolvePrice(json(826.77, 694.7647058823529, { linked: false }), opts(false));
+        assert.equal(net.priceNetMinor, null);
+        assert.equal(net.problem.kind, 'subCentPrice');
+        assert.deepEqual(net.roundedFromLinked, { gross: false, net: false });
+        const gross = resolvePrice(json(12.3165, 10.35, { linked: false }), opts(true));
+        assert.equal(gross.priceGrossMinor, null);
+        assert.deepEqual(gross.problem, { kind: 'subCentPrice', field: 'gross', value: 12.3165, reason: 'gross price sub-minor-unit precision' });
+    });
+
+    test('linked does not turn a missing or non-numeric price into a number', () => {
+        const r = resolvePrice(json(null, 'abc', { linked: true }), opts(true));
+        assert.equal(r.priceGrossMinor, null);
+        assert.equal(r.priceNetMinor, null);
+        assert.equal(r.problem.kind, 'unconvertiblePrice');
+        assert.deepEqual(r.roundedFromLinked, { gross: false, net: false });
     });
 
     test('a missing chosen price is unconvertible, not zero', () => {

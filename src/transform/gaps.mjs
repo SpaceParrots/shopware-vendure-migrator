@@ -45,7 +45,9 @@ export function buildGaps(raw, { families, collections, skippedLinks, redirects,
         prices: {
             offersWithoutConvertibleGross: priceStats.grossNotConvertible,
             offersWithoutConvertibleNet: priceStats.netNotConvertible,
-            verdict: 'both prices are kept when convertible to minor units; only the one load sends (gross or net, see pricesIncludeTax) can refuse an offer, see problems.refusedOffers',
+            grossRoundedFromLinked: priceStats.grossRoundedFromLinked,
+            netRoundedFromLinked: priceStats.netRoundedFromLinked,
+            verdict: 'both prices are kept when convertible to minor units; a sub-cent price Shopware derived from the other one (linked: true) is rounded half-up to the currency decimals and counted in *RoundedFromLinked; an unlinked sub-cent price is not rounded, and only the one load sends (gross or net, see pricesIncludeTax) can refuse an offer, see problems.refusedOffers',
         },
         visibility: {
             verdict: 'Vendure has channel membership, not per-channel visibility levels',
