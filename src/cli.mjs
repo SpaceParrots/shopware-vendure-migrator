@@ -2,7 +2,7 @@
 // Each stage reads the previous stage's files, so stages can be re-run independently.
 import path from 'node:path';
 import { STAGES, latestSnapshot, loadConfig, namedSnapshot, newSnapshotName } from './config.mjs';
-import { log } from './lib/util.mjs';
+import { log, logError } from './lib/util.mjs';
 
 const USAGE = `Usage: node src/cli.mjs <stage> [--snapshot <id>]
        npm run <stage> [-- --snapshot <id>]
@@ -29,10 +29,6 @@ oracle finds resolver mismatches.
 
 Settings come from environment variables; see .env.example.
 `;
-
-// util.log writes to stdout; errors go to stderr in the same format, so a redirected stdout
-// still leaves them on the terminal.
-const logError = (...args) => process.stderr.write(`${new Date().toISOString().slice(11, 19)} ${args.join(' ')}\n`);
 
 const [stage, ...rest] = process.argv.slice(2);
 const flag = name => {

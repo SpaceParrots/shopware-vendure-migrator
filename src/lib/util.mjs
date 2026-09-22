@@ -130,3 +130,13 @@ export function toCsv(header, rows) {
 export function log(...args) {
     console.log(new Date().toISOString().slice(11, 19), ...args);
 }
+
+/**
+ * Prints a line to stderr in the same format as `log`, so errors stay on the terminal when
+ * stdout is redirected.
+ * @param {...unknown} args Passed to console.error.
+ * @returns {void} Never throws.
+ */
+export function logError(...args) {
+    console.error(new Date().toISOString().slice(11, 19), ...args);
+}

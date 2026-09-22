@@ -1,7 +1,9 @@
 // toMinorUnits decides whether a Shopware price reaches Vendure at all; slugify decides URLs and
 // codes; toCsv writes the redirect list. Each is pinned with the inputs the source data can have.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { slugify, toCsv, toMinorUnits } from '../src/lib/util.mjs';
 
 describe('toMinorUnits', () => {
@@ -105,5 +107,24 @@ describe('slugify', () => {
 
     test('keeps an existing slug stable', () => {
         assert.equal(slugify('main-product-with-variants'), 'main-product-with-variants');
+    });
+});
+
+describe('log and logError', () => {
+    // Run in a child process so the assertion sees the real streams, not the test runner's.
+    const run = code =>
+        spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' });
+    const line = /^\d{2}:\d{2}:\d{2} FAILED load 3\n$/;
+
+    test('log writes to stdout only', () => {
+        const r = run(`import { log } from './src/lib/util.mjs'; log('FAILED', 'load', 3);`);
+        assert.match(r.stdout, line);
+        assert.equal(r.stderr, '');
+    });
+
+    test('logError writes the same format to stderr only', () => {
+        const r = run(`import { logError } from './src/lib/util.mjs'; logError('FAILED', 'load', 3);`);
+        assert.match(r.stderr, line);
+        assert.equal(r.stdout, '');
     });
 });
