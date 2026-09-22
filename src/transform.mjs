@@ -384,7 +384,7 @@ export async function transform(config, snapshotDir) {
     const ruleNames = new Map(raw.rules.map(r => [r.id, r]));
     const tierRows = raw.product_price_summary.reduce((n, r) => n + Number(r.tiers), 0);
     gaps.rulePrices = {
-        verdict: 'not migrated; solution sketched as price strategies in vendure/src/plugins/shopware-rule-prices',
+        verdict: 'not migrated; solution sketched as price strategies in sketches/shopware-rule-prices (never run)',
         rows: tierRows,
         rules: [...groupBy(raw.product_price_summary, 'rule_id').entries()].map(([ruleId, rows]) => ({
             name: ruleNames.get(ruleId)?.name,
