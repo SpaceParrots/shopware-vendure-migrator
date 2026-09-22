@@ -167,3 +167,59 @@ describe('prices', () => {
         assert.deepEqual(r.priceStats, { offersWithListPrice: 1, offersWithOtherCurrencies: 1, otherCurrencyKeys: { [usd]: 1 }, grossNotConvertible: 0, netNotConvertible: 0 });
     });
 });
+
+describe('media and cover inheritance', () => {
+    const pm = (id, product_id, media_id, position) => ({ id, product_id, media_id, position });
+    const raw = snapshot({
+        products: [
+            product('p', { cover_product_media_id: 'pm-2' }),
+            variant('v-none', 'p'),
+            variant('v-own', 'p'),
+            variant('v-own-cover', 'p', { cover_product_media_id: 'pm-oc-2' }),
+        ],
+        product_media: [pm('pm-2', 'p', 'm-2', 1), pm('pm-1', 'p', 'm-1', 0), pm('pm-own', 'v-own', 'm-own', 0), pm('pm-oc', 'v-own-cover', 'm-oc', 0), pm('pm-oc-2', 'v-own-cover', 'm-oc-2', 1)],
+    });
+    const r = build(raw);
+
+    test('a variant without media rows takes the parent gallery, in position order', () => {
+        assert.deepEqual(offerOf(r, 'v-none').mediaSourceIds, ['m-1', 'm-2']);
+    });
+
+    test('a variant with own media keeps only its own gallery', () => {
+        assert.deepEqual(offerOf(r, 'v-own').mediaSourceIds, ['m-own']);
+    });
+
+    test('the cover is a scalar field: NULL inherits the parent cover, even next to an own gallery', () => {
+        assert.equal(offerOf(r, 'v-none').coverMediaSourceId, 'm-2');
+        assert.equal(offerOf(r, 'v-own').coverMediaSourceId, 'm-2');
+        assert.equal(offerOf(r, 'v-own-cover').coverMediaSourceId, 'm-oc-2');
+    });
+
+    test('provenance counts inherited galleries and covers', () => {
+        assert.equal(r.provenance.mediaFromParent, 1);
+        assert.equal(r.provenance.coverFromParent, 2);
+    });
+});
+
+describe('visibility inheritance', () => {
+    const vis = (product_id, sales_channel_id, visibility) => ({ product_id, sales_channel_id, visibility });
+    const raw = snapshot({
+        products: [product('p'), variant('v-none', 'p'), variant('v-other-channel', 'p'), variant('v-own', 'p')],
+        product_visibilities: [vis('p', SF, 30), vis('v-other-channel', 'headless', 30), vis('v-own', SF, 10)],
+    });
+    const r = build(raw);
+
+    test('a variant without visibility rows takes the parent rows', () => {
+        assert.deepEqual(offerOf(r, 'v-none').storefrontVisibility, [30]);
+    });
+
+    test('own rows in another channel replace the parent rows, so the storefront sees nothing', () => {
+        // Deciding on rows already filtered to the storefront would wrongly inherit the parent's 30.
+        assert.deepEqual(offerOf(r, 'v-other-channel').storefrontVisibility, []);
+    });
+
+    test('own storefront rows are used as they are', () => {
+        assert.deepEqual(offerOf(r, 'v-own').storefrontVisibility, [10]);
+        assert.equal(r.provenance.visibilityFromParent, 1);
+    });
+});

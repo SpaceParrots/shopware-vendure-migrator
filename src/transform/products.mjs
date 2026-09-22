@@ -3,7 +3,7 @@ import { byLangMap, inherit, inheritRows } from '../lib/resolve.mjs';
 import { groupBy, slugify } from '../lib/util.mjs';
 import { resolvePrice } from './prices.mjs';
 
-const byPosition = (a, b) => a.position - b.position;
+const byPosition = (a, b) => a.position - b.position || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 /**
  * Lookup tables over the product tables of a snapshot. Pure; the raw arrays are not modified.
@@ -20,7 +20,9 @@ export function indexProducts(raw, storefront) {
         categoriesOf: groupBy(raw.product_categories, 'product_id'),
         mediaOf: groupBy(raw.product_media, 'product_id'),
         productMediaById: new Map(raw.product_media.map(pm => [pm.id, pm])),
-        visibilityOf: groupBy(raw.product_visibilities.filter(v => v.sales_channel_id === storefront.id), 'product_id'),
+        // Unfiltered on purpose: own-or-parent is decided on all channels, the storefront filter comes after.
+        visibilityOf: groupBy(raw.product_visibilities, 'product_id'),
+        storefrontId: storefront.id,
         groupNames: groupBy(raw.property_group_translations, 'group_id'),
         optionNames: groupBy(raw.property_group_option_translations, 'option_id'),
         optionById: new Map(raw.property_group_options.map(o => [o.id, o])),
@@ -57,8 +59,12 @@ export function resolveOffer(row, parent, idx, pricing) {
     if (!tax.value) problems.push({ kind: 'untaxed', entry: row.product_number });
     const refusalReasons = [priceProblem?.reason, tax.value ? null : 'no tax after inheritance'].filter(Boolean);
 
-    const ownMedia = (idx.mediaOf.get(row.id) ?? []).toSorted(byPosition);
-    const cover = row.cover_product_media_id ? idx.productMediaById.get(row.cover_product_media_id) : undefined;
+    // ProductDefinition flags media (association) and product_media_id (the cover) as Inherited.
+    const media = inheritRows(idx.mediaOf, row, parent);
+    const coverRef = inherit(row, parent, 'cover_product_media_id');
+    const cover = coverRef.value ? idx.productMediaById.get(coverRef.value) : undefined;
+    // visibilities is an inherited association too.
+    const visibility = inheritRows(idx.visibilityOf, row, parent);
 
     return {
         offer: {
@@ -74,10 +80,9 @@ export function resolveOffer(row, parent, idx, pricing) {
             optionSourceIds: (idx.optionsOf.get(row.id) ?? []).map(o => o.option_id),
             ownPropertyOptionIds: (idx.propertiesOf.get(row.id) ?? []).map(p => p.option_id),
             effectiveCategoryIds: categories.rows.map(c => c.category_id),
-            mediaSourceIds: ownMedia.map(m => m.media_id),
+            mediaSourceIds: media.rows.toSorted(byPosition).map(m => m.media_id),
             coverMediaSourceId: cover?.media_id ?? null,
-            // visibilities is an inherited association, like categories and properties.
-            storefrontVisibility: inheritRows(idx.visibilityOf, row, parent).rows.map(v => v.visibility),
+            storefrontVisibility: visibility.rows.filter(v => v.sales_channel_id === idx.storefrontId).map(v => v.visibility),
         },
         from: {
             price: price.from,
@@ -86,7 +91,9 @@ export function resolveOffer(row, parent, idx, pricing) {
             active: active.from,
             categories: categories.from,
             properties: properties.from,
-            media: 'own',
+            media: media.from,
+            cover: coverRef.from,
+            visibility: visibility.from,
         },
         problems: refusalReasons.length
             ? [...problems, { kind: 'refusedOffers', entry: { sku: row.product_number, sourceId: row.id, reasons: refusalReasons } }]
@@ -188,6 +195,8 @@ export function buildFamilies(raw, ctx) {
         categoriesFromParent: count('categories', 'parent'),
         propertiesFromParent: count('properties', 'parent'),
         mediaFromParent: count('media', 'parent'),
+        coverFromParent: count('cover', 'parent'),
+        visibilityFromParent: count('visibility', 'parent'),
     };
     const problemsOf = kind => resolved.flatMap(r => r.problems.filter(p => p.kind === kind).map(p => p.entry));
     const problems = {
