@@ -6,6 +6,7 @@ import { describe, test } from 'node:test';
 import {
     authoredOnly,
     byLangMap,
+    effectiveTaxRules,
     groupTaxZones,
     inherit,
     inheritRows,
@@ -133,11 +134,26 @@ describe('resolveTranslated', () => {
         assert.equal(result.ch.authoredIn, 'en');
     });
 
-    test('the child product exhausts its whole language chain before the parent product', () => {
-        // The variant has only an English name, the parent product a German one. Shopware shows
-        // the variant's English name in German, not the parent's German name.
+    test('the fallback is language-major: the parent translation in a language beats the child in the next language', () => {
+        // Shopware's COALESCE chain (EntityDefinitionQueryHelper::buildTranslationChain) is, per
+        // language from specific to system: own translation, then the parent's. The variant has only
+        // an English name, the parent a German one, so German shows the parent's German name.
         const result = resolve(rows([SYSTEM, 'Variant']), rows([SYSTEM, 'Parent'], ['de-de', 'Eltern']));
-        assert.deepEqual(result.de, { value: 'Variant', authoredIn: 'en', owner: 'own' });
+        assert.deepEqual(result.de, { value: 'Eltern', authoredIn: 'de', owner: 'parent' });
+        assert.deepEqual(result.en, { value: 'Variant', authoredIn: 'en', owner: 'own' });
+    });
+
+    test('language-major also holds along a child language chain', () => {
+        // de-CH -> de-DE -> system. The variant has de-DE, the parent de-CH: in de-CH the parent's
+        // de-CH row comes before the variant's de-DE row.
+        const result = resolve(rows([SYSTEM, 'Variant'], ['de-de', 'Variante']), rows([SYSTEM, 'Parent'], ['de-ch', 'Eltern CH']));
+        assert.deepEqual(result.ch, { value: 'Eltern CH', authoredIn: 'ch', owner: 'parent' });
+        assert.deepEqual(result.de, { value: 'Variante', authoredIn: 'de', owner: 'own' });
+    });
+
+    test('the child translation wins over the parent translation in the same language', () => {
+        const result = resolve(rows([SYSTEM, 'Variant'], ['de-de', 'Variante']), rows([SYSTEM, 'Parent'], ['de-de', 'Eltern']));
+        assert.deepEqual(result.de, { value: 'Variante', authoredIn: 'de', owner: 'own' });
     });
 
     test('a child product without any translation takes the parent product value', () => {
@@ -225,5 +241,58 @@ describe('groupTaxZones', () => {
         const all = countries.flatMap(c => [rule(c.sourceId, 'standard', '21'), rule(c.sourceId, 'reduced', '6')]);
         const { taxZones } = groupTaxZones(countries, taxCategories, all);
         assert.deepEqual(taxZones.map(z => [z.key, z.isDefault]), [['21/6', false]]);
+    });
+});
+
+describe('effectiveTaxRules', () => {
+    const NOW = '2026-09-22 12:00:00.000';
+    const rule = (id, active_from, extra = {}) => ({ id, country_id: 'at', tax_id: 'standard', tax_rate: 20, type: 'entire_country', active_from, ...extra });
+
+    test('a rule without active_from applies', () => {
+        const { rules, future, duplicates } = effectiveTaxRules([rule('r1', null)], NOW);
+        assert.deepEqual(rules.map(r => r.id), ['r1']);
+        assert.deepEqual([future, duplicates], [[], []]);
+    });
+
+    test('the newest rule that is already active wins over older and undated ones', () => {
+        const all = [rule('undated', null), rule('old', '2020-01-01 00:00:00.000'), rule('new', '2026-01-01 00:00:00.000')];
+        const { rules, duplicates } = effectiveTaxRules(all, NOW);
+        assert.deepEqual(rules.map(r => r.id), ['new']);
+        assert.deepEqual(duplicates, [{ type: 'entire_country', country_id: 'at', tax_id: 'standard', rules: 3, chosen: 'new', ambiguous: false }]);
+    });
+
+    test('a rule that starts after the snapshot is future and not applied', () => {
+        const { rules, future } = effectiveTaxRules([rule('now', null), rule('later', '2027-01-01 00:00:00.000')], NOW);
+        assert.deepEqual(rules.map(r => r.id), ['now']);
+        assert.deepEqual(future.map(r => r.id), ['later']);
+    });
+
+    test('a rule starting exactly at the snapshot time applies', () => {
+        assert.deepEqual(effectiveTaxRules([rule('edge', NOW)], NOW).rules.map(r => r.id), ['edge']);
+    });
+
+    test('equal dates pick the lowest id and are flagged ambiguous', () => {
+        const { rules, duplicates } = effectiveTaxRules([rule('b', null), rule('a', null)], NOW);
+        assert.deepEqual(rules.map(r => r.id), ['a']);
+        assert.equal(duplicates[0].ambiguous, true);
+    });
+
+    test('rules of other countries, taxes or types are not duplicates of each other', () => {
+        const all = [rule('a', null), rule('b', null, { country_id: 'de' }), rule('c', null, { tax_id: 'reduced' }), rule('d', null, { type: 'zip_code' })];
+        const { rules, duplicates } = effectiveTaxRules(all, NOW);
+        assert.equal(rules.length, 4);
+        assert.deepEqual(duplicates, []);
+    });
+
+    test('an unreadable active_from is reported and ignored; an unreadable snapshot time throws', () => {
+        const { rules, invalid } = effectiveTaxRules([rule('ok', null), rule('bad', 'soon')], NOW);
+        assert.deepEqual([rules.map(r => r.id), invalid.map(r => r.id)], [['ok'], ['bad']]);
+        assert.throws(() => effectiveTaxRules([], undefined), /unreadable snapshot time/);
+    });
+
+    test('feeding the winners to groupTaxZones uses the rate in force, not the last row', () => {
+        const all = [rule('new', '2026-01-01 00:00:00.000', { tax_rate: 20 }), rule('old', null, { tax_rate: 10 })];
+        const { taxZones } = groupTaxZones([{ sourceId: 'at', code: 'AT' }], [{ sourceId: 'standard', defaultRate: 19 }], effectiveTaxRules(all, NOW).rules);
+        assert.deepEqual(taxZones.map(z => z.key), ['20']);
     });
 });

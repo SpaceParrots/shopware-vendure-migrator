@@ -1,8 +1,8 @@
 // toMinorUnits decides whether a Shopware price reaches Vendure at all; slugify decides URLs and
-// codes. Both are pinned to their current behaviour, including the inputs they do not reject.
+// codes; toCsv writes the redirect list. Each is pinned with the inputs the source data can have.
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { slugify, toMinorUnits } from '../src/lib/util.mjs';
+import { slugify, toCsv, toMinorUnits } from '../src/lib/util.mjs';
 
 describe('toMinorUnits', () => {
     test('converts decimal strings and numbers to cents', () => {
@@ -28,14 +28,51 @@ describe('toMinorUnits', () => {
 
     test('rejects values that are not numbers', () => {
         assert.deepEqual(toMinorUnits('abc'), { ok: false, reason: 'not a number', value: 'abc' });
-        assert.deepEqual(toMinorUnits(undefined), { ok: false, reason: 'not a number', value: undefined });
         assert.deepEqual(toMinorUnits(Infinity), { ok: false, reason: 'not a number', value: Infinity });
+        assert.deepEqual(toMinorUnits(NaN), { ok: false, reason: 'not a number', value: NaN });
     });
 
-    test('treats null and empty string as zero, so callers must check for a missing price first', () => {
-        // Number(null) and Number('') are 0. Transform checks for a missing price before calling this.
-        assert.deepEqual(toMinorUnits(null), { ok: true, minor: 0 });
-        assert.deepEqual(toMinorUnits(''), { ok: true, minor: 0 });
+    test('rejects null, undefined and blank strings as missing instead of reading them as zero', () => {
+        // Number(null), Number('') and Number(' ') are all 0; a missing price must never become a free product.
+        assert.deepEqual(toMinorUnits(null), { ok: false, reason: 'missing', value: null });
+        assert.deepEqual(toMinorUnits(undefined), { ok: false, reason: 'missing', value: undefined });
+        assert.deepEqual(toMinorUnits(''), { ok: false, reason: 'missing', value: '' });
+        assert.deepEqual(toMinorUnits('  '), { ok: false, reason: 'missing', value: '  ' });
+    });
+
+    test('rejects input that is neither a string nor a number', () => {
+        // Number(true) is 1 and Number([5]) is 5; neither is a price.
+        for (const value of [true, false, {}, [5], 5n]) {
+            assert.deepEqual(toMinorUnits(value), { ok: false, reason: 'not a string or number', value });
+        }
+    });
+
+    test('zero is a price, not a missing value', () => {
+        assert.deepEqual(toMinorUnits(0), { ok: true, minor: 0 });
+        assert.deepEqual(toMinorUnits('0.00'), { ok: true, minor: 0 });
+    });
+
+    test('throws on an invalid decimals argument', () => {
+        assert.throws(() => toMinorUnits('1', -1), RangeError);
+        assert.throws(() => toMinorUnits('1', 1.5), RangeError);
+        assert.throws(() => toMinorUnits('1', '2'), RangeError);
+    });
+});
+
+describe('toCsv', () => {
+    test('writes plain fields unquoted and ends every line with CRLF', () => {
+        assert.equal(toCsv(['a', 'b'], [['x', 1]]), 'a,b\r\nx,1\r\n');
+    });
+
+    test('quotes fields with commas, quotes and line breaks, doubling inner quotes', () => {
+        assert.equal(
+            toCsv(['v'], [['a,b'], ['say "hi"'], ['line\nbreak'], ['cr\r']]),
+            'v\r\n"a,b"\r\n"say ""hi"""\r\n"line\nbreak"\r\n"cr\r"\r\n',
+        );
+    });
+
+    test('writes null and undefined as empty fields', () => {
+        assert.equal(toCsv(['a', 'b', 'c'], [[null, undefined, 0]]), 'a,b,c\r\n,,0\r\n');
     });
 });
 
@@ -48,6 +85,11 @@ describe('slugify', () => {
     test('strips accents and spells out sharp s', () => {
         assert.equal(slugify('Größe Äpfel'), 'grosse-apfel');
         assert.equal(slugify('Crème brûlée'), 'creme-brulee');
+    });
+
+    test('strips every combining mark, not only the basic diacritics block', () => {
+        // U+1DC4 is in Combining Diacritical Marks Supplement, U+20D7 in the marks-for-symbols block.
+        assert.equal(slugify('a᷄b⃗'), 'ab');
     });
 
     test('drops characters without an ASCII decomposition', () => {
