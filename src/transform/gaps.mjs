@@ -6,11 +6,11 @@ const FULL_VISIBILITY = 30; // ProductVisibilityDefinition::VISIBILITY_ALL
 
 /**
  * @param {object} raw Snapshot tables (rules, product_price_summary, currencies, product_configurator_settings).
- * @param {object} built { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps }.
+ * @param {object} built { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps }.
  * @returns {object} The gaps.json content. Keys read by verify: rulePrices, currencies, visibility,
  *   categories, closeout, configurator, seo, notInSlice. Never throws.
  */
-export function buildGaps(raw, { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps }) {
+export function buildGaps(raw, { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps }) {
     const allOffers = families.flatMap(f => f.offers);
     const ruleById = new Map(raw.rules.map(r => [r.id, r]));
     const configuratorByProduct = groupBy(raw.product_configurator_settings, 'product_id');
@@ -20,6 +20,7 @@ export function buildGaps(raw, { families, collections, skippedLinks, redirects,
     }, 0);
     return {
         ...taxGaps,
+        languages: languageGaps,
         rulePrices: {
             verdict: 'not migrated; solution sketched as price strategies in sketches/shopware-rule-prices (never run)',
             rows: raw.product_price_summary.reduce((n, r) => n + Number(r.tiers), 0),

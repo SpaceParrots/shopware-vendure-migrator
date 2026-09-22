@@ -11,7 +11,7 @@ import { buildAssets } from './transform/assets.mjs';
 import { buildCollections, offersByCategory } from './transform/collections.mjs';
 import { buildFacets } from './transform/facets.mjs';
 import { buildGaps } from './transform/gaps.mjs';
-import { buildLanguages } from './transform/languages.mjs';
+import { buildLanguages, languageGaps } from './transform/languages.mjs';
 import { buildFamilies, slugFromSeoOrName } from './transform/products.mjs';
 import { buildRedirects, redirectsCsv, seoPaths } from './transform/redirects.mjs';
 import { buildCountries, buildTax, pickStorefront } from './transform/tax.mjs';
@@ -50,6 +50,7 @@ export function buildModel(raw, { mediaBaseUrl }) {
         problems: products.problems,
         familyIssues: products.familyIssues,
         taxGaps: tax.gaps,
+        languageGaps: languageGaps(raw, lang.droppedLanguages),
     });
 
     const allOffers = families.flatMap(f => f.offers);
