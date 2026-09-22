@@ -1,7 +1,7 @@
 // Shopware products -> product families (Vendure Products) with their offers (ProductVariants).
-import { SHOPWARE } from '../config.mjs';
 import { byLangMap, inherit, inheritRows } from '../lib/resolve.mjs';
-import { groupBy, slugify, toMinorUnits } from '../lib/util.mjs';
+import { groupBy, slugify } from '../lib/util.mjs';
+import { resolvePrice } from './prices.mjs';
 
 const byPosition = (a, b) => a.position - b.position;
 
@@ -32,11 +32,13 @@ export function indexProducts(raw, storefront) {
  * @param {object} row The product row.
  * @param {object|null} parent Its parent row, or null for a top-level product.
  * @param {object} idx Output of indexProducts.
- * @returns {{ offer: object, from: Record<string, string>, problems: Array<{ kind: string, entry: unknown }> }}
- *   `offer` has no `names`; the caller adds them. `from` records own/parent/none per inherited field.
- * @throws {SyntaxError} When the price column holds invalid JSON.
+ * @param {{ currencyId: string, decimals: number, pricesIncludeTax: boolean }} pricing See resolvePrice.
+ * @returns {{ offer: object, from: Record<string, string>, problems: Array<{ kind: string, entry: unknown }>, price: object }}
+ *   `offer` has no `names`; the caller adds them. `from` records own/parent/none per inherited
+ *   field; `price` is the resolvePrice result.
+ * @throws Never; an unreadable price is reported as a problem.
  */
-export function resolveOffer(row, parent, idx) {
+export function resolveOffer(row, parent, idx, pricing) {
     const price = inherit(row, parent, 'price');
     const tax = inherit(row, parent, 'tax_id');
     const manufacturer = inherit(row, parent, 'manufacturer_id');
@@ -45,17 +47,15 @@ export function resolveOffer(row, parent, idx) {
     const properties = inheritRows(idx.propertiesOf, row, parent);
     const problems = [];
 
-    const priceKey = `c${SHOPWARE.CURRENCY}`;
-    const priceJson = typeof price.value === 'string' ? JSON.parse(price.value) : price.value;
-    let priceGrossMinor = null;
-    if (!priceJson) problems.push({ kind: 'unpriced', entry: row.product_number });
-    else if (!priceJson[priceKey]) problems.push({ kind: 'nonDefaultCurrencyOnly', entry: row.product_number });
-    else {
-        const minor = toMinorUnits(priceJson[priceKey].gross);
-        if (minor.ok) priceGrossMinor = minor.minor;
-        else problems.push({ kind: 'subCentPrice', entry: { sku: row.product_number, gross: priceJson[priceKey].gross } });
+    const prices = resolvePrice(price.value, pricing);
+    const priceProblem = prices.problem;
+    if (priceProblem?.kind === 'subCentPrice' || priceProblem?.kind === 'unconvertiblePrice') {
+        problems.push({ kind: priceProblem.kind, entry: { sku: row.product_number, field: priceProblem.field, value: priceProblem.value, reason: priceProblem.reason } });
+    } else if (priceProblem) {
+        problems.push({ kind: priceProblem.kind, entry: row.product_number });
     }
     if (!tax.value) problems.push({ kind: 'untaxed', entry: row.product_number });
+    const refusalReasons = [priceProblem?.reason, tax.value ? null : 'no tax after inheritance'].filter(Boolean);
 
     const ownMedia = (idx.mediaOf.get(row.id) ?? []).toSorted(byPosition);
     const cover = row.cover_product_media_id ? idx.productMediaById.get(row.cover_product_media_id) : undefined;
@@ -65,7 +65,8 @@ export function resolveOffer(row, parent, idx) {
             sourceId: row.id,
             sku: row.product_number,
             enabled: Boolean(active.value),
-            priceGrossMinor,
+            priceGrossMinor: prices.priceGrossMinor,
+            priceNetMinor: prices.priceNetMinor,
             taxSourceId: tax.value,
             manufacturerSourceId: manufacturer.value,
             stockOnHand: Number(row.stock),
@@ -87,7 +88,10 @@ export function resolveOffer(row, parent, idx) {
             properties: properties.from,
             media: 'own',
         },
-        problems,
+        problems: refusalReasons.length
+            ? [...problems, { kind: 'refusedOffers', entry: { sku: row.product_number, sourceId: row.id, reasons: refusalReasons } }]
+            : problems,
+        price: prices,
     };
 }
 
@@ -115,19 +119,20 @@ export function variantNames(resolvedNames, optionSourceIds, optionLabel, author
 /**
  * Builds the families (Vendure Products) and their offers (ProductVariants).
  * @param {object} raw Snapshot tables.
- * @param {object} ctx { storefront, defaultLanguageCode, translated, authored, namesOf, productSlugOf }.
+ * @param {object} ctx { storefront, defaultLanguageCode, translated, authored, namesOf, productSlugOf, pricing }.
  * @returns {{
  *   families: object[],
  *   provenance: Record<string, number>,
  *   problems: Record<string, unknown[]>,
+ *   priceStats: { offersWithListPrice: number, offersWithOtherCurrencies: number, otherCurrencyKeys: Record<string, number>, netNotConvertible: number, grossNotConvertible: number },
  *   optionUsage: { parentsWithOptionRows: number },
  *   familyIssues: Array<{ family: string, sku: string, issue: string }>,
  *   decisions: Array<{ topic: string, text: string }>,
  * }}
- * @throws {SyntaxError} When a price column holds invalid JSON.
+ * @throws Never on data problems; they are returned in `problems`.
  */
 export function buildFamilies(raw, ctx) {
-    const { defaultLanguageCode, translated, authored, namesOf, productSlugOf } = ctx;
+    const { defaultLanguageCode, translated, authored, namesOf, productSlugOf, pricing } = ctx;
     const idx = indexProducts(raw, ctx.storefront);
     const optionLabel = (optionId, code) => {
         const names = namesOf(idx.optionNames.get(optionId));
@@ -146,13 +151,13 @@ export function buildFamilies(raw, ctx) {
 
         const offers = isFamily
             ? children.map(child => {
-                const r = resolveOffer(child, row, idx);
+                const r = resolveOffer(child, row, idx, pricing);
                 resolved.push(r);
                 const childNames = translated(byLangMap(idx.translationsOf.get(child.id) ?? []), ownTranslations, 'name');
                 return { ...r.offer, names: variantNames(childNames, r.offer.optionSourceIds, optionLabel, authored) };
             })
             : [(() => {
-                const r = resolveOffer(row, null, idx);
+                const r = resolveOffer(row, null, idx, pricing);
                 resolved.push(r);
                 return { ...r.offer, names };
             })()];
@@ -190,18 +195,33 @@ export function buildFamilies(raw, ctx) {
         untaxed: problemsOf('untaxed'),
         subCentPrice: problemsOf('subCentPrice'),
         nonDefaultCurrencyOnly: problemsOf('nonDefaultCurrencyOnly'),
+        invalidPriceJson: problemsOf('invalidPriceJson'),
+        unconvertiblePrice: problemsOf('unconvertiblePrice'),
+        // Every offer load refuses: its chosen price (gross or net, by pricesIncludeTax) or its tax is missing.
+        refusedOffers: problemsOf('refusedOffers'),
+    };
+    const otherCurrencyKeys = {};
+    for (const key of resolved.flatMap(r => r.price.otherCurrencyKeys)) otherCurrencyKeys[key] = (otherCurrencyKeys[key] ?? 0) + 1;
+    const priceStats = {
+        offersWithListPrice: resolved.filter(r => r.price.hasListPrice).length,
+        offersWithOtherCurrencies: resolved.filter(r => r.price.otherCurrencyKeys.length).length,
+        otherCurrencyKeys,
+        grossNotConvertible: resolved.filter(r => r.price.priceGrossMinor === null).length,
+        netNotConvertible: resolved.filter(r => r.price.priceNetMinor === null).length,
     };
 
     return {
         families,
         provenance,
         problems,
+        priceStats,
         optionUsage: { parentsWithOptionRows: raw.products.filter(p => !p.parent_id && (idx.optionsOf.get(p.id) ?? []).length).length },
         familyIssues: familyIssuesOf(families, idx),
         decisions: [
             { topic: 'variants', text: 'A Shopware parent with children becomes one Vendure Product; only the children become ProductVariants. The parent row itself is never turned into a buyable variant. A product without children becomes a Product with exactly one variant.' },
             { topic: 'variant names', text: 'Variants whose name is inherited from the parent get the option labels appended (e.g. "Hoodie Red / M"), because Vendure lists variants by name. Variants with their own name keep it unchanged.' },
             { topic: 'translations', text: 'Translated values are resolved in Shopware DAL order, language-major: for each language of the chain (requested, its parent language, the system language) first the variant\'s own translation, then the parent product\'s, then the next language. A translation is only written to Vendure when the value was authored in that language; otherwise Vendure falls back to the default language, which yields the same text Shopware shows.' },
+            { topic: 'prices', text: `Every offer carries priceGrossMinor and priceNetMinor from the default-currency entry of Shopware's price JSON, in minor units with ${pricing.decimals} decimals (${pricing.decimalsSource === 'item_rounding' ? 'currency.item_rounding' : 'default, item_rounding has none'}). Load sends the gross price when the storefront customer group shows gross prices (pricesIncludeTax), else the net price; a value with more decimals than the currency is never rounded, it becomes null and the offer is listed in gaps.problems.refusedOffers.` },
             { topic: 'stock', text: 'stockOnHand is product.stock (physical). available_stock is not used; open orders are not migrated, so there is nothing to allocate against in Vendure yet.' },
         ],
     };

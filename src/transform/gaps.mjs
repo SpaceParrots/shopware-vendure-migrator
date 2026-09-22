@@ -6,13 +6,14 @@ const FULL_VISIBILITY = 30; // ProductVisibilityDefinition::VISIBILITY_ALL
 
 /**
  * @param {object} raw Snapshot tables (rules, product_price_summary, currencies, product_configurator_settings).
- * @param {object} built { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps }.
+ * @param {object} built { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats }.
  * @returns {object} The gaps.json content. Keys read by verify: rulePrices, currencies, visibility,
  *   categories, closeout, configurator, seo, notInSlice. Never throws.
  */
-export function buildGaps(raw, { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps }) {
+export function buildGaps(raw, { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats }) {
     const allOffers = families.flatMap(f => f.offers);
     const ruleById = new Map(raw.rules.map(r => [r.id, r]));
+    const isoByKey = new Map(raw.currencies.map(c => [`c${c.id}`, c.iso_code]));
     const configuratorByProduct = groupBy(raw.product_configurator_settings, 'product_id');
     const configuratorUnused = families.filter(f => f.kind === 'family').reduce((n, f) => {
         const used = new Set(f.offers.flatMap(o => o.optionSourceIds));
@@ -32,8 +33,19 @@ export function buildGaps(raw, { families, collections, skippedLinks, redirects,
             })),
         },
         currencies: {
-            verdict: 'only the default currency is stored per product; Shopware derives the others at runtime from currency.factor',
+            verdict: 'only the default-currency price is migrated; explicit prices a product stores for other currencies are not, nor the factor-based prices Shopware derives at runtime for the rest',
             notMigrated: raw.currencies.filter(c => c.id !== SHOPWARE.CURRENCY).map(c => `${c.iso_code} (factor ${c.factor})`),
+            offersWithExplicitPricesInOtherCurrencies: priceStats.offersWithOtherCurrencies,
+            explicitPricesByCurrency: Object.fromEntries(Object.entries(priceStats.otherCurrencyKeys).map(([k, n]) => [isoByKey.get(k) ?? k, n])),
+        },
+        listPrices: {
+            offers: priceStats.offersWithListPrice,
+            verdict: 'Shopware list prices (the struck-through "before" price) are not migrated; Vendure has no list price field',
+        },
+        prices: {
+            offersWithoutConvertibleGross: priceStats.grossNotConvertible,
+            offersWithoutConvertibleNet: priceStats.netNotConvertible,
+            verdict: 'both prices are kept when convertible to minor units; only the one load sends (gross or net, see pricesIncludeTax) can refuse an offer, see problems.refusedOffers',
         },
         visibility: {
             verdict: 'Vendure has channel membership, not per-channel visibility levels',

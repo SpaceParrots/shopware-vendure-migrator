@@ -59,9 +59,10 @@ function snapshot(overrides = {}) {
     };
 }
 
-function build(raw) {
+function build(raw, { pricesIncludeTax = true } = {}) {
     const lang = buildLanguages(raw.languages, SYS);
-    return buildFamilies(raw, { ...lang, storefront: { id: SF }, productSlugOf: (id, code, name) => `${id}-${code}` });
+    const pricing = { currencyId: SHOPWARE.CURRENCY, decimals: 2, decimalsSource: 'item_rounding', pricesIncludeTax };
+    return buildFamilies(raw, { ...lang, storefront: { id: SF }, pricing, productSlugOf: (id, code, name) => `${id}-${code}` });
 }
 
 const tr = (product_id, language_id, name) => ({ product_id, language_id, name, description: null });
@@ -105,5 +106,64 @@ describe('variant names', () => {
         const simple = build(snapshot({ products: [product('s')], product_translations: [tr('s', SYS, 'Mug')] }));
         assert.equal(simple.families[0].kind, 'simple');
         assert.deepEqual(simple.families[0].offers.map(o => [o.sourceId, o.names]), [['s', { en: 'Mug' }]]);
+    });
+});
+
+describe('prices', () => {
+    const raw = snapshot({
+        products: [
+            product('gross-shop', { price: price('11.90', '10') }),
+            product('derived-net', { price: price(826.77, 694.7647058823529) }),
+            product('no-price', { price: null }),
+            product('p'),
+            variant('v', 'p'),
+        ],
+    });
+
+    test('every offer keeps both gross and net in minor units, or null when not convertible', () => {
+        const r = build(raw);
+        assert.deepEqual([offerOf(r, 'gross-shop').priceGrossMinor, offerOf(r, 'gross-shop').priceNetMinor], [1190, 1000]);
+        // Shopware stores a net price derived from gross at full float precision; it is not a price.
+        assert.deepEqual([offerOf(r, 'derived-net').priceGrossMinor, offerOf(r, 'derived-net').priceNetMinor], [82677, null]);
+        assert.equal(offerOf(r, 'v').priceGrossMinor, 1000, 'variant inherits the parent price');
+    });
+
+    test('a gross-price shop refuses only offers whose gross price or tax is missing', () => {
+        const { problems } = build(raw, { pricesIncludeTax: true });
+        assert.deepEqual(problems.refusedOffers.map(o => [o.sku, o.reasons]), [['NO-PRICE', ['no price']]]);
+        assert.deepEqual(problems.unpriced, ['NO-PRICE']);
+        assert.deepEqual(problems.subCentPrice, []);
+    });
+
+    test('a net-price shop refuses offers whose net price is not convertible and names the field', () => {
+        const { problems } = build(raw, { pricesIncludeTax: false });
+        assert.deepEqual(problems.refusedOffers.map(o => [o.sku, o.reasons]), [
+            ['DERIVED-NET', ['net price sub-minor-unit precision']],
+            ['NO-PRICE', ['no price']],
+        ]);
+        assert.deepEqual(problems.subCentPrice, [{ sku: 'DERIVED-NET', field: 'net', value: 694.7647058823529, reason: 'net price sub-minor-unit precision' }]);
+    });
+
+    test('an offer without tax after inheritance is refused, with the reason', () => {
+        const r = build(snapshot({ products: [product('p', { tax_id: null }), variant('v', 'p')] }));
+        assert.deepEqual(r.problems.untaxed, ['V']);
+        assert.deepEqual(r.problems.refusedOffers.map(o => [o.sku, o.reasons]), [['V', ['no tax after inheritance']]]);
+        assert.equal(offerOf(r, 'v').taxSourceId, null);
+    });
+
+    test('invalid price JSON is a problem, not a crash', () => {
+        const r = build(snapshot({ products: [product('broken', { price: '{"c' })] }));
+        assert.deepEqual(r.problems.invalidPriceJson, ['BROKEN']);
+        assert.equal(offerOf(r, 'broken').priceGrossMinor, null);
+    });
+
+    test('counts list prices and explicit prices in other currencies', () => {
+        const usd = 'c0000usd';
+        const withExtras = JSON.stringify({
+            [CUR]: { gross: 10, net: 8.4, linked: true, listPrice: { gross: 12, net: 10.08, linked: true } },
+            [usd]: { gross: 11, net: 9.24, linked: true },
+        });
+        const r = build(snapshot({ products: [product('a', { price: withExtras }), product('b')] }));
+        assert.deepEqual(r.priceStats, { offersWithListPrice: 1, offersWithOtherCurrencies: 1, otherCurrencyKeys: { [usd]: 1 }, grossNotConvertible: 0, netNotConvertible: 0 });
     });
 });

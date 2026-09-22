@@ -12,6 +12,7 @@ import { buildCollections, offersByCategory } from './transform/collections.mjs'
 import { buildFacets } from './transform/facets.mjs';
 import { buildGaps } from './transform/gaps.mjs';
 import { buildLanguages, languageGaps } from './transform/languages.mjs';
+import { currencyDecimals } from './transform/prices.mjs';
 import { buildFamilies, slugFromSeoOrName } from './transform/products.mjs';
 import { buildRedirects, redirectsCsv, seoPaths } from './transform/redirects.mjs';
 import { buildCountries, buildTax, pickStorefront } from './transform/tax.mjs';
@@ -21,20 +22,25 @@ import { buildCountries, buildTax, pickStorefront } from './transform/tax.mjs';
  * @param {object} raw Snapshot tables keyed by file name (raw/<name>.json).
  * @param {{ mediaBaseUrl: string }} options
  * @returns {{ model: object, decisions: object[], gaps: object, diagnostics: object, redirects: object[] }}
- * @throws {Error} When the snapshot has no usable storefront or system language, or a locale has
- *   no Vendure language; {SyntaxError} when a price column holds invalid JSON.
+ * @throws {Error} When the snapshot has no active storefront, no system language or no default
+ *   currency, or a locale has no Vendure language.
  */
 export function buildModel(raw, { mediaBaseUrl }) {
     const lang = buildLanguages(raw.languages, SHOPWARE.LANGUAGE_SYSTEM);
     const storefront = pickStorefront(raw.sales_channels, SHOPWARE.SALES_CHANNEL_TYPE_STOREFRONT);
     const ctx = { ...lang, storefront };
+    const defaultCurrency = raw.currencies.find(c => c.id === SHOPWARE.CURRENCY);
+    if (!defaultCurrency) throw new Error(`The Shopware default currency ${SHOPWARE.CURRENCY} is not in the snapshot.`);
+    const { decimals, source: decimalsSource } = currencyDecimals(defaultCurrency);
+    const pricesIncludeTax = Boolean(storefront.display_gross);
+    const pricing = { currencyId: SHOPWARE.CURRENCY, decimals, decimalsSource, pricesIncludeTax };
 
     const countries = buildCountries(raw, ctx);
     const tax = buildTax(raw, countries);
 
     const productSeo = seoPaths(raw.seo_urls, 'frontend.detail.page', ctx);
     const categorySeo = seoPaths(raw.seo_urls, 'frontend.navigation.page', ctx);
-    const products = buildFamilies(raw, { ...ctx, productSlugOf: slugFromSeoOrName(productSeo) });
+    const products = buildFamilies(raw, { ...ctx, pricing, productSlugOf: slugFromSeoOrName(productSeo) });
     const { families } = products;
     const facets = buildFacets(raw, ctx);
     const membership = offersByCategory(families, o => o.effectiveCategoryIds);
@@ -50,6 +56,7 @@ export function buildModel(raw, { mediaBaseUrl }) {
         problems: products.problems,
         familyIssues: products.familyIssues,
         taxGaps: tax.gaps,
+        priceStats: products.priceStats,
         languageGaps: languageGaps(raw, lang.droppedLanguages),
     });
 
@@ -73,8 +80,9 @@ export function buildModel(raw, { mediaBaseUrl }) {
         generatedAt: new Date().toISOString(),
         defaultLanguageCode: lang.defaultLanguageCode,
         languageCodes: lang.languageCodes,
-        currencyCode: raw.currencies.find(c => c.id === SHOPWARE.CURRENCY).iso_code,
-        pricesIncludeTax: Boolean(storefront.display_gross),
+        currencyCode: defaultCurrency.iso_code,
+        currencyDecimals: decimals,
+        pricesIncludeTax,
         countries,
         taxCategories: tax.taxCategories,
         taxZones: tax.taxZones,
@@ -118,6 +126,6 @@ export async function transform(config, snapshotDir) {
     const p = gaps.problems;
     log(`transform: ${e.products} products, ${e.variants} variants (${e.families} families, ${e.simpleProducts} simple), ${e.collections} collections, ${e.assets} assets, ${e.taxZones} tax zones`);
     log(`transform: provenance ${JSON.stringify(provenance)}`);
-    log(`transform: problems unpriced=${p.unpriced.length} untaxed=${p.untaxed.length} subCent=${p.subCentPrice.length} familyIssues=${p.familyIssues.length}`);
+    log(`transform: problems unpriced=${p.unpriced.length} untaxed=${p.untaxed.length} subCent=${p.subCentPrice.length} refusedOffers=${p.refusedOffers.length} familyIssues=${p.familyIssues.length}`);
     return model;
 }
