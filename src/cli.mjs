@@ -1,11 +1,8 @@
 // Usage: node src/cli.mjs <extract|transform|load|verify|oracle|all> [--snapshot <id>]
 // Each stage reads the previous stage's files, so stages can be re-run independently.
-import fs from 'node:fs/promises';
 import path from 'node:path';
-import { loadConfig } from './config.mjs';
+import { STAGES, latestSnapshot, loadConfig, namedSnapshot, newSnapshotName } from './config.mjs';
 import { log } from './lib/util.mjs';
-
-const STAGES = ['extract', 'transform', 'load', 'verify', 'oracle', 'all'];
 
 const USAGE = `Usage: node src/cli.mjs <stage> [--snapshot <id>]
        npm run <stage> [-- --snapshot <id>]
@@ -27,8 +24,15 @@ Flags:
                    a new snapshot.
   -h, --help       Show this help.
 
+Exit code 1 when a stage throws, load records failures, verify has failed checks or
+oracle finds resolver mismatches.
+
 Settings come from environment variables; see .env.example.
 `;
+
+// util.log writes to stdout; errors go to stderr in the same format, so a redirected stdout
+// still leaves them on the terminal.
+const logError = (...args) => process.stderr.write(`${new Date().toISOString().slice(11, 19)} ${args.join(' ')}\n`);
 
 const [stage, ...rest] = process.argv.slice(2);
 const flag = name => {
@@ -38,13 +42,6 @@ const flag = name => {
     if (!rest[i + 1] || rest[i + 1].startsWith('--')) throw new Error(`--${name} needs a value.`);
     return rest[i + 1];
 };
-
-async function latestSnapshot(outDir) {
-    const dir = path.join(outDir, 'snapshots');
-    const entries = (await fs.readdir(dir).catch(() => [])).sort();
-    if (!entries.length) throw new Error('No snapshot found; run extract first.');
-    return path.join(dir, entries[entries.length - 1]);
-}
 
 async function main() {
     if (stage === '--help' || stage === '-h' || stage === 'help') {
@@ -61,24 +58,42 @@ async function main() {
         throw new Error(`Unknown stage "${stage}". Use extract, transform, load, verify, oracle or all. See --help.`);
     }
 
-    const config = loadConfig();
+    const config = loadConfig(stage);
     const needsNew = stage === 'extract' || stage === 'all';
     const snapshotDir = needsNew
-        ? path.join(config.outDir, 'snapshots', new Date().toISOString().replace(/[:.]/g, '-'))
+        ? path.join(config.outDir, 'snapshots', newSnapshotName())
         : flag('snapshot')
-          ? path.join(config.outDir, 'snapshots', flag('snapshot'))
+          ? await namedSnapshot(config.outDir, flag('snapshot'))
           : await latestSnapshot(config.outDir);
     log(`stage=${stage} snapshot=${path.basename(snapshotDir)}`);
 
+    // Stages keep running after a problem so `all` still produces the verify report; the exit
+    // code carries the outcome.
+    const problems = [];
     if (stage === 'extract' || stage === 'all') await (await import('./extract.mjs')).extract(config, snapshotDir);
     if (stage === 'transform' || stage === 'all') await (await import('./transform.mjs')).transform(config, snapshotDir);
-    if (stage === 'load' || stage === 'all') await (await import('./load.mjs')).load(config, snapshotDir);
-    if (stage === 'verify' || stage === 'all') await (await import('./verify.mjs')).verify(config, snapshotDir);
-    if (stage === 'oracle') await (await import('./oracle.mjs')).oracle(config, snapshotDir);
+    if (stage === 'load' || stage === 'all') {
+        const result = await (await import('./load.mjs')).load(config, snapshotDir);
+        if (result.failures.length) problems.push(`load recorded ${result.failures.length} failures (load-result.json)`);
+    }
+    if (stage === 'verify' || stage === 'all') {
+        const report = await (await import('./verify.mjs')).verify(config, snapshotDir);
+        const failed = report.checks.filter(x => !x.pass).length;
+        if (failed) problems.push(`verify failed ${failed} of ${report.checks.length} checks (verify-report.json)`);
+    }
+    if (stage === 'oracle') {
+        const result = await (await import('./oracle.mjs')).oracle(config, snapshotDir);
+        const mismatches = Object.values(result.resolver).reduce((n, list) => n + list.length, 0);
+        if (mismatches) problems.push(`oracle found ${mismatches} resolver mismatches (oracle-report.json)`);
+    }
+    if (problems.length) {
+        for (const p of problems) logError(`FAILED ${p}`);
+        process.exitCode = 1;
+    }
 }
 
 main().catch(err => {
-    console.error(err.stack ?? err);
-    if (err.graphqlErrors) console.error(JSON.stringify(err.graphqlErrors, null, 2));
-    process.exit(1);
+    logError(err.stack ?? String(err));
+    if (err.graphqlErrors) logError(JSON.stringify(err.graphqlErrors, null, 2));
+    process.exitCode = 1;
 });
