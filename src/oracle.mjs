@@ -6,61 +6,56 @@
 import mysql from 'mysql2/promise';
 import path from 'node:path';
 import { SHOPWARE } from './config.mjs';
-import { Bindings } from './lib/bindings.mjs';
+import { openBindings } from './lib/bindings.mjs';
+import { request } from './lib/http.mjs';
 import { log, readJson, toMinorUnits, writeJson } from './lib/util.mjs';
 import { VendureClient } from './lib/vendure-client.mjs';
 
-function required(name) {
-    const v = process.env[name];
-    if (!v) throw new Error(`Missing required environment variable ${name}`);
-    return v;
-}
+const PAGE_ADMIN = 500;
+const PAGE_STORE = 100;
 
-async function shopwareAdminToken(base) {
-    const res = await fetch(`${base}/api/oauth/token`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-            grant_type: 'password',
-            client_id: 'administration',
-            username: required('SOURCE_ADMIN_USER'),
-            password: required('SOURCE_ADMIN_PASSWORD'),
-            scope: 'write',
-        }),
+// Every Shopware call here reads, so each may retry; the token request only opens a session.
+const post = (http, url, headers, body) => request(url, {
+    ...http,
+    method: 'POST',
+    retry: true,
+    headers: { 'content-type': 'application/json', accept: 'application/json', ...headers },
+    body: JSON.stringify(body),
+});
+
+async function shopwareAdminToken(http, base, source) {
+    const { data: body } = await post(http, `${base}/api/oauth/token`, {}, {
+        grant_type: 'password',
+        client_id: 'administration',
+        username: source.adminUser,
+        password: source.adminPassword,
+        scope: 'write',
     });
-    const body = await res.json();
-    if (!body.access_token) throw new Error(`Shopware admin login failed: ${JSON.stringify(body).slice(0, 200)}`);
+    if (!body?.access_token) throw new Error(`Shopware admin login at ${base} failed: ${JSON.stringify(body).slice(0, 200)}`);
     return body.access_token;
 }
 
-async function adminProducts(base, token) {
+async function adminProducts(http, base, token) {
     const out = [];
     for (let page = 1; ; page++) {
-        const res = await fetch(`${base}/api/search/product`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${token}`, 'sw-inheritance': '1' },
-            body: JSON.stringify({ limit: 500, page, includes: { product: ['id', 'productNumber', 'price', 'taxId', 'active', 'parentId'] } }),
-        });
-        const body = await res.json();
-        if (!body.data) throw new Error(`Admin API search failed: ${JSON.stringify(body).slice(0, 200)}`);
+        const { data: body } = await post(
+            http, `${base}/api/search/product`, { authorization: `Bearer ${token}`, 'sw-inheritance': '1' },
+            { limit: PAGE_ADMIN, page, includes: { product: ['id', 'productNumber', 'price', 'taxId', 'active', 'parentId'] } },
+        );
+        if (!Array.isArray(body?.data)) throw new Error(`Admin API search failed: ${JSON.stringify(body).slice(0, 200)}`);
         out.push(...body.data);
-        if (body.data.length < 500) return out;
+        if (body.data.length < PAGE_ADMIN) return out;
     }
 }
 
-async function storeProducts(base, accessKey) {
+async function storeProducts(http, base, accessKey) {
     const out = [];
     for (let page = 1; ; page++) {
-        const res = await fetch(`${base}/store-api/product`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', accept: 'application/json', 'sw-access-key': accessKey },
-            // No `includes`: the filter empties `translated`, which has no apiAlias of its own.
-            body: JSON.stringify({ limit: 100, page }),
-        });
-        const body = await res.json();
-        if (!body.elements) throw new Error(`Store API failed: ${JSON.stringify(body).slice(0, 200)}`);
+        // No `includes`: the filter empties `translated`, which has no apiAlias of its own.
+        const { data: body } = await post(http, `${base}/store-api/product`, { 'sw-access-key': accessKey }, { limit: PAGE_STORE, page });
+        if (!Array.isArray(body?.elements)) throw new Error(`Store API failed: ${JSON.stringify(body).slice(0, 200)}`);
         out.push(...body.elements);
-        if (body.elements.length < 100) return out;
+        if (body.elements.length < PAGE_STORE) return out;
     }
 }
 
@@ -73,35 +68,26 @@ async function vendureVariants(client) {
             { skip },
         );
         out.push(...productVariants.items);
-        if (out.length >= productVariants.totalItems) return out;
+        if (out.length >= productVariants.totalItems || !productVariants.items.length) return out;
     }
 }
 
-export async function oracle(config, snapshotDir) {
-    const base = config.source.mediaBaseUrl.replace(/\/$/, '');
-    const model = await readJson(path.join(snapshotDir, 'model.json'));
-    const bindings = await new Bindings(path.join(config.outDir, 'bindings.json'), path.join(snapshotDir, 'oracle-journal.ndjson')).load();
-    const client = new VendureClient(config.target);
-    await client.login();
-
-    const token = await shopwareAdminToken(base);
-    const [admin, store, vendure] = await Promise.all([
-        adminProducts(base, token),
-        storeProducts(base, required('SOURCE_STORE_ACCESS_KEY')),
-        vendureVariants(client),
-    ]);
-    log(`oracle: shopware admin ${admin.length}, store ${store.length}, vendure variants ${vendure.length}`);
+/**
+ * Compares every model offer with Shopware's Admin API (resolved base price, tax, active flag),
+ * the Store API (name, guest price) and the Vendure variant bound to it.
+ * @returns {{ r: object, guestTier1: Map<string, number|null> }} `r` holds the counts and lists
+ *   of the report; `guestTier1` the observed quantity-1 rule price per product, or null.
+ */
+export function compareOffers({ model, bindings, admin, store, vendure }) {
     const adminById = new Map(admin.map(p => [p.id, p]));
     const storeById = new Map(store.map(p => [p.id, p]));
     const vendureById = new Map(vendure.map(v => [String(v.id), v]));
-
     const r = {
         compared: 0,
-        resolver: { basePriceMismatch: [], taxMismatch: [], activeMismatch: [], missingInAdminApi: [] },
+        resolver: { basePriceMismatch: [], taxMismatch: [], activeMismatch: [], missingInAdminApi: [], missingInVendure: [] },
         names: { mismatch: [], notInStoreApi: 0 },
         guestPrice: { comparable: 0, equal: 0, different: 0, higherInShopware: 0, lowerInShopware: 0, maxAbsDiffMinor: 0, sumAbsDiffMinor: 0, withTierPrices: 0, examples: [] },
     };
-    const currencyKey = SHOPWARE.CURRENCY;
     const guestTier1 = new Map();
     for (const family of model.families) {
         for (const o of family.offers) {
@@ -109,10 +95,12 @@ export async function oracle(config, snapshotDir) {
             const a = adminById.get(o.sourceId);
             const s = storeById.get(o.sourceId);
             r.compared++;
+            // Counted on its own: otherwise a missing variant only lowers the comparable counts.
+            if (!v) r.resolver.missingInVendure.push(o.sku);
             if (!a) { r.resolver.missingInAdminApi.push(o.sku); continue; }
 
             // Resolver check: Shopware's own inheritance vs the migrator's.
-            const priceEntry = (a.price ?? []).find(p => p.currencyId === currencyKey);
+            const priceEntry = (a.price ?? []).find(p => p.currencyId === SHOPWARE.CURRENCY);
             const shopwareGross = priceEntry ? toMinorUnits(priceEntry.gross).minor : null;
             if (shopwareGross !== o.priceGrossMinor || (v && v.priceWithTax !== shopwareGross)) {
                 r.resolver.basePriceMismatch.push({ sku: o.sku, shopware: shopwareGross, model: o.priceGrossMinor, vendure: v?.priceWithTax });
@@ -148,24 +136,34 @@ export async function oracle(config, snapshotDir) {
             }
         }
     }
-    // Which rule won? Match the observed tier-1 price against each rule's tier-1 price for the
-    // product. Then test the claim: the winner is the first rule by (priority DESC, id ASC) among
-    // the rules proven to match a guest, i.e. rules observed winning somewhere.
-    const conn = await mysql.createConnection({
-        host: config.source.host, port: config.source.port, user: config.source.user,
-        password: config.source.password, database: config.source.database, charset: 'utf8mb4',
+    return { r, guestTier1 };
+}
+
+/** Reads each product's quantity-1 rule prices and all rules from the Shopware database. */
+async function rulePriceRows(connect, source) {
+    const conn = await connect({
+        host: source.host, port: source.port, user: source.user,
+        password: source.password, database: source.database, charset: 'utf8mb4',
     });
-    let tier1Rows, rules;
     try {
-        [tier1Rows] = await conn.query(
-            `SELECT LOWER(HEX(product_id)) product_id, LOWER(HEX(rule_id)) rule_id,
-                JSON_EXTRACT(price, '$.c${currencyKey}.gross') gross
-             FROM product_price WHERE quantity_start = 1 AND product_version_id = UNHEX('${SHOPWARE.LIVE_VERSION}')`,
+        const [tier1Rows] = await conn.execute(
+            `SELECT LOWER(HEX(product_id)) product_id, LOWER(HEX(rule_id)) rule_id, JSON_EXTRACT(price, ?) gross
+             FROM product_price WHERE quantity_start = 1 AND product_version_id = UNHEX(?)`,
+            [`$.c${SHOPWARE.CURRENCY}.gross`, SHOPWARE.LIVE_VERSION],
         );
-        [rules] = await conn.query(`SELECT LOWER(HEX(id)) id, name, priority FROM rule`);
+        const [rules] = await conn.execute('SELECT LOWER(HEX(id)) id, name, priority FROM rule');
+        return { tier1Rows, rules };
     } finally {
         await conn.end();
     }
+}
+
+/**
+ * Which rule won? Match the observed tier-1 price against each rule's tier-1 price for the
+ * product. Then test the claim: the winner is the first rule by (priority DESC, id ASC) among
+ * the rules proven to match a guest, i.e. rules observed winning somewhere.
+ */
+export function ruleSelection(guestTier1, tier1Rows, rules) {
     const ruleById = new Map(rules.map(x => [x.id, x]));
     const tier1ByProduct = new Map();
     for (const row of tier1Rows) {
@@ -189,9 +187,13 @@ export async function oracle(config, snapshotDir) {
         if (eligible[0] === winner) agree++;
         else disagree.push({ productId, observed: ruleById.get(winner)?.name, predicted: ruleById.get(eligible[0])?.name });
     }
+    // Keyed by rule id: two rules may share a name. The name stays for reading.
     const winnerTally = {};
-    for (const id of observed.values()) winnerTally[ruleById.get(id).name] = (winnerTally[ruleById.get(id).name] ?? 0) + 1;
-    r.ruleSelection = {
+    for (const id of observed.values()) {
+        winnerTally[id] ??= { name: ruleById.get(id)?.name, count: 0 };
+        winnerTally[id].count++;
+    }
+    return {
         productsWithObservedWinner: observed.size,
         ambiguousPriceMatch: ambiguous.length,
         rulesProvenToMatchGuest: [...provenMatching].sort(order).map(id => `${ruleById.get(id).name} (priority ${ruleById.get(id).priority}, id ${id})`),
@@ -200,18 +202,57 @@ export async function oracle(config, snapshotDir) {
         disagreeExamples: disagree.slice(0, 5),
         winnerTally,
     };
-    log(`oracle rule selection: observed winner for ${observed.size} products (${ambiguous.length} ambiguous); priority DESC, id ASC predicts ${agree}, misses ${disagree.length}`);
-    log(`oracle winners: ${JSON.stringify(winnerTally)}`);
+}
+
+/**
+ * Compares the model and Vendure with Shopware's own Admin and Store API and writes the report.
+ *
+ * Side effects: reads bindings.json and every snapshot's load journal read-only; logs in to
+ * Shopware and Vendure; reads the `product_price` and `rule` tables; writes
+ * `<snapshot>/oracle-report.json`. Changes nothing in Shopware or Vendure.
+ *
+ * @param {ReturnType<import('./config.mjs').loadConfig>} config Needs the source database, the
+ *   Shopware admin user and store access key, and Vendure.
+ * @param {string} snapshotDir Snapshot holding model.json.
+ * @param {{ client?: VendureClient, fetch?: typeof fetch, connect?: typeof mysql.createConnection }} [deps]
+ *   Replacements for tests.
+ * @returns {Promise<object>} The report. `resolverMismatches` counts every entry under `resolver`.
+ * @throws {Error} When a login fails, an API answers with an error, or bindings.json belongs to
+ *   another Vendure.
+ */
+export async function oracle(config, snapshotDir, deps = {}) {
+    const base = config.source.mediaBaseUrl.replace(/\/$/, '');
+    const http = { ...config.http, ...(deps.fetch ? { fetch: deps.fetch } : {}) };
+    const model = await readJson(path.join(snapshotDir, 'model.json'));
+    const bindings = await openBindings(config, snapshotDir, { readOnly: true });
+    const client = deps.client ?? new VendureClient(config.target, http);
+    await client.login();
+
+    const token = await shopwareAdminToken(http, base, config.source);
+    const [admin, store, vendure] = await Promise.all([
+        adminProducts(http, base, token),
+        storeProducts(http, base, config.source.storeAccessKey),
+        vendureVariants(client),
+    ]);
+    log(`oracle: shopware admin ${admin.length}, store ${store.length}, vendure variants ${vendure.length}`);
+    const { r, guestTier1 } = compareOffers({ model, bindings, admin, store, vendure });
+
+    const { tier1Rows, rules } = await rulePriceRows(deps.connect ?? mysql.createConnection, config.source);
+    r.ruleSelection = ruleSelection(guestTier1, tier1Rows, rules);
+    const sel = r.ruleSelection;
+    log(`oracle rule selection: observed winner for ${sel.productsWithObservedWinner} products (${sel.ambiguousPriceMatch} ambiguous); priority DESC, id ASC predicts ${sel.predictionAgrees}, misses ${sel.predictionDisagrees}`);
+    log(`oracle winners: ${JSON.stringify(sel.winnerTally)}`);
 
     const measuredAt = new Date();
     const result = {
         measuredAt: measuredAt.toISOString(),
         weekdayInShopTimezone: new Intl.DateTimeFormat('en-GB', { weekday: 'long', timeZone: 'Europe/Berlin' }).format(measuredAt),
         context: 'Store API guest context of the storefront sales channel, quantity 1',
+        resolverMismatches: Object.values(r.resolver).reduce((n, list) => n + list.length, 0),
         ...r,
     };
     await writeJson(path.join(snapshotDir, 'oracle-report.json'), result);
-    log(`oracle resolver: basePrice mismatches ${r.resolver.basePriceMismatch.length}, tax ${r.resolver.taxMismatch.length}, active ${r.resolver.activeMismatch.length}, missing ${r.resolver.missingInAdminApi.length}`);
+    log(`oracle resolver: basePrice mismatches ${r.resolver.basePriceMismatch.length}, tax ${r.resolver.taxMismatch.length}, active ${r.resolver.activeMismatch.length}, missing in admin api ${r.resolver.missingInAdminApi.length}, missing in vendure ${r.resolver.missingInVendure.length}`);
     log(`oracle names: mismatches ${r.names.mismatch.length}, not in store api ${r.names.notInStoreApi}`);
     log(`oracle guest price (${result.weekdayInShopTimezone}): comparable ${r.guestPrice.comparable}, equal ${r.guestPrice.equal}, different ${r.guestPrice.different} (higher in Shopware ${r.guestPrice.higherInShopware}, lower ${r.guestPrice.lowerInShopware}), max diff ${r.guestPrice.maxAbsDiffMinor}`);
     return result;
