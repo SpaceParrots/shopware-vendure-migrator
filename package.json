@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Catalogue migration from Shopware 6 to Vendure 3. Experimental, local use.",
+  "description": "Command-line tool that migrates the product catalogue of a Shopware 6.7 shop into Vendure 3.7 and verifies the result.",
   "scripts": {
     "help": "node src/cli.mjs --help",
     "extract": "node --env-file-if-exists=.env src/cli.mjs extract",
