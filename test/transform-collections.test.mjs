@@ -95,4 +95,31 @@ describe('membership from the listing index', () => {
         assert.equal(gaps.collectionsLosingMembers, 2);
         assert.match(gaps.verdict, /^1 offers have category assignments but no product_category_tree rows/);
     });
+
+    test('categoryIndexGaps flags an index that has the direct categories but not their ancestors', () => {
+        // After dal:refresh:index over stale category paths: o1 is indexed on fruit only.
+        const stale = [{ offers: [offer('o1', ['fruit'], ['fruit'])] }];
+        const members = offersByCategory(stale, o => o.listingCategoryIds);
+        const { collections } = buildCollections({ categories, category_translations: [] }, {
+            storefront: {}, translated: () => ({}), authored: () => ({}), categorySlugOf: () => '',
+        }, members);
+        const gaps = categoryIndexGaps(categories, stale, collections);
+        assert.equal(gaps.offersAssignedButNotIndexed, 0);
+        assert.equal(gaps.membershipsFromIndex, 1);
+        assert.equal(gaps.membershipsIfIndexed, 3);
+        assert.equal(gaps.collectionsLosingMembers, 2);
+        assert.match(gaps.verdict, /^2 collections have fewer members .* \(1 of 3 memberships\): product_category_tree lacks ancestor rows/);
+        assert.match(gaps.verdict, /dal:refresh:index/);
+    });
+
+    test('categoryIndexGaps reports a complete index as complete', () => {
+        const complete = [{ offers: [offer('o1', ['fruit'], ['fruit', 'food', 'root'])] }];
+        const members = offersByCategory(complete, o => o.listingCategoryIds);
+        const { collections } = buildCollections({ categories, category_translations: [] }, {
+            storefront: {}, translated: () => ({}), authored: () => ({}), categorySlugOf: () => '',
+        }, members);
+        const gaps = categoryIndexGaps(categories, complete, collections);
+        assert.equal(gaps.collectionsLosingMembers, 0);
+        assert.equal(gaps.verdict, 'the listing index covers every assigned offer and its ancestor categories');
+    });
 });

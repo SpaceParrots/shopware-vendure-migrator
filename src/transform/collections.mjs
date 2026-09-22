@@ -111,13 +111,15 @@ export function categoryIndexGaps(categories, families, collections) {
     const membershipsIfIndexed = [...collected.values()].reduce((n, set) => n + set.size, 0);
     const membershipsFromIndex = collections.reduce((n, c) => n + c.offerSourceIds.length, 0);
     const offersAssignedButNotIndexed = offers.filter(o => o.effectiveCategoryIds.length && !o.listingCategoryIds.length).length;
-    return {
-        offersAssignedButNotIndexed,
-        membershipsFromIndex,
-        membershipsIfIndexed,
-        collectionsLosingMembers: collections.filter(c => (collected.get(c.sourceId)?.size ?? 0) > c.offerSourceIds.length).length,
-        verdict: offersAssignedButNotIndexed
-            ? `${offersAssignedButNotIndexed} offers have category assignments but no product_category_tree rows, so the Shopware storefront lists them in no category and the migration does the same. If they should be listed, run bin/console dal:refresh:index on the source and extract again.`
-            : 'the listing index covers every assigned offer',
-    };
+    const collectionsLosingMembers = collections.filter(c => (collected.get(c.sourceId)?.size ?? 0) > c.offerSourceIds.length).length;
+    // Offers with some index rows can still lack their ancestor categories: Shopware writes the
+    // ancestors from category.path, and dal:refresh:index runs the product indexer before the
+    // category indexer, so a first run over stale paths indexes only the direct assignments.
+    let verdict = 'the listing index covers every assigned offer and its ancestor categories';
+    if (offersAssignedButNotIndexed) {
+        verdict = `${offersAssignedButNotIndexed} offers have category assignments but no product_category_tree rows, so the Shopware storefront lists them in no category and the migration does the same. If they should be listed, run bin/console dal:refresh:index on the source and extract again.`;
+    } else if (collectionsLosingMembers) {
+        verdict = `${collectionsLosingMembers} collections have fewer members than the assigned categories and their ancestors imply (${membershipsFromIndex} of ${membershipsIfIndexed} memberships): product_category_tree lacks ancestor rows, so the Shopware storefront and the migration list those offers only in their direct categories. dal:refresh:index runs the product indexer before the category indexer, so after stale category paths it has to run twice; run it on the source until this count is 0 and extract again.`;
+    }
+    return { offersAssignedButNotIndexed, membershipsFromIndex, membershipsIfIndexed, collectionsLosingMembers, verdict };
 }
