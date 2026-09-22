@@ -1,5 +1,5 @@
 // Storefront sales channel, countries, tax categories and tax zones.
-import { groupTaxZones } from '../lib/resolve.mjs';
+import { effectiveTaxRules, groupTaxZones } from '../lib/resolve.mjs';
 import { groupBy } from '../lib/util.mjs';
 
 /**
@@ -40,29 +40,44 @@ export function buildCountries(raw, { storefront, namesOf }) {
 
 /**
  * Tax categories (by Shopware position) and the tax zones Vendure needs for them.
- * @param {object} raw Snapshot tables (taxes, tax_rules).
+ * @param {object} raw Snapshot tables (taxes, tax_rules, source_identity).
  * @param {Array<{ sourceId: string, code: string }>} countries Output of buildCountries.
  * @returns {{
  *   taxCategories: Array<{ sourceId: string, name: string, defaultRate: number, isDefault: boolean }>,
  *   taxZones: object[],
- *   gaps: { taxRulesNotCountryWide?: number },
+ *   gaps: { taxRulesNotCountryWide?: number, taxRules: object },
  *   decisions: Array<{ topic: string, text: string }>,
- * }} Never throws.
+ * }}
+ * @throws {Error} When the snapshot has no readable extract time (source_identity.utc_now).
  */
 export function buildTax(raw, countries) {
     const taxCategories = raw.taxes
         .toSorted((a, b) => a.position - b.position)
         .map((t, i) => ({ sourceId: t.id, name: t.name, defaultRate: Number(t.tax_rate), isDefault: i === 0 }));
-    const nonCountryRules = raw.tax_rules.filter(r => r.type !== 'entire_country');
-    const { taxZones, defaultTuple } = groupTaxZones(countries, taxCategories, raw.tax_rules);
+    const asOf = raw.source_identity?.[0]?.utc_now;
+    const effective = effectiveTaxRules(raw.tax_rules, asOf);
+    const nonCountryRules = effective.rules.filter(r => r.type !== 'entire_country');
+    const { taxZones, defaultTuple } = groupTaxZones(countries, taxCategories, effective.rules);
+    const isoOf = new Map(countries.map(c => [c.sourceId, c.code]));
+    const taxName = new Map(taxCategories.map(t => [t.sourceId, t.name]));
+    const describe = r => ({ id: r.id, type: r.type, country: isoOf.get(r.country_id) ?? r.country_id, tax: taxName.get(r.tax_id) ?? r.tax_id, rate: Number(r.tax_rate), activeFrom: r.active_from });
     return {
         taxCategories,
         taxZones,
-        gaps: nonCountryRules.length ? { taxRulesNotCountryWide: nonCountryRules.length } : {},
+        gaps: {
+            ...(nonCountryRules.length ? { taxRulesNotCountryWide: nonCountryRules.length } : {}),
+            taxRules: {
+                asOf,
+                futureRules: effective.future.map(describe),
+                duplicateRules: effective.duplicates.map(d => ({ ...d, country: isoOf.get(d.country_id) ?? d.country_id, tax: taxName.get(d.tax_id) ?? d.tax_id })),
+                unreadableActiveFrom: effective.invalid.map(describe),
+                verdict: 'rates are the tax rules in force at extract time (newest active_from not after it); rules that start later are not migrated and need a manual rate change in Vendure on their date',
+            },
+        },
         decisions: [
             {
                 topic: 'tax',
-                text: `Shopware applies a tax's default rate everywhere except countries with a tax_rule. Vendure rates belong to zones, so countries are grouped by their rate tuple (${taxCategories.map(t => t.name).join(' / ')}) into ${taxZones.length} tax zones. The zone matching the default rates (${defaultTuple}) is the channel's default tax zone.`,
+                text: `Shopware applies a tax's default rate everywhere except countries with a tax_rule. Vendure rates belong to zones, so countries are grouped by their rate tuple (${taxCategories.map(t => t.name).join(' / ')}) into ${taxZones.length} tax zones. The zone matching the default rates (${defaultTuple}) is the channel's default tax zone. Of several rules for one country and tax, the one in force at extract time (${asOf} UTC) is used: the newest active_from that is not later.`,
             },
         ],
     };

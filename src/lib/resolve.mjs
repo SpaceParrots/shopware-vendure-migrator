@@ -151,7 +151,11 @@ export function authoredOnly(resolved, defaultLanguageCode) {
  * tax category, in category order) share one zone. The zone whose tuple equals the default rates
  * is marked as the default. Other tax_rule types are ignored here; transform reports them as a gap.
  *
- * `countries` are `{ sourceId, code }`, `taxCategories` are `{ sourceId, defaultRate }`.
+ * @param {Array<{ sourceId: string, code: string }>} countries
+ * @param {Array<{ sourceId: string, defaultRate: number }>} taxCategories In category order.
+ * @param {Array<{ country_id: string, tax_id: string, tax_rate: unknown, type: string }>} taxRules
+ *   At most one rule per (type, country, tax): pass the `rules` of effectiveTaxRules.
+ * @returns {{ taxZones: object[], defaultTuple: string }} Never throws.
  */
 export function groupTaxZones(countries, taxCategories, taxRules) {
     // Rate per (country, tax): the tax_rule if present, otherwise the tax's default rate.
@@ -169,9 +173,58 @@ export function groupTaxZones(countries, taxCategories, taxRules) {
     const taxZones = [...zoneByTuple.values()].map(z => ({
         key: z.key,
         name: `Tax ${z.key} (${z.countryCodes.length} ${z.countryCodes.length === 1 ? 'country' : 'countries'})`,
-        countryCodes: z.countryCodes.sort(),
+        countryCodes: z.countryCodes.toSorted(),
         rates: Object.fromEntries(taxCategories.map((t, i) => [t.sourceId, z.rates[i]])),
         isDefault: z.key === defaultTuple,
     }));
     return { taxZones, defaultTuple };
+}
+
+/** Milliseconds of a Shopware DATETIME string ('YYYY-MM-DD HH:MM:SS[.fff]', stored in UTC), or NaN. */
+function utcMillis(value) {
+    return typeof value === 'string' ? Date.parse(`${value.trim().replace(' ', 'T')}Z`) : NaN;
+}
+
+/**
+ * The tax rules in force at `asOf`, one per (type, country, tax), as Shopware picks them: rules
+ * whose active_from is NULL or not after `asOf` apply, and among those the newest active_from wins
+ * (NULL counts as oldest; TaxRuleCollection::latestActivationDate). Equal dates are resolved by rule
+ * id and reported as ambiguous, because Shopware's own pick then depends on row order.
+ * @param {Array<{ id: string, country_id: string, tax_id: string, type: string, active_from: string|null }>} taxRules
+ * @param {string} asOf The snapshot time, same format and time zone (UTC) as active_from.
+ * @returns {{
+ *   rules: object[],
+ *   future: object[],
+ *   invalid: object[],
+ *   duplicates: Array<{ type: string, country_id: string, tax_id: string, rules: number, chosen: string, ambiguous: boolean }>,
+ * }} rules: the winners; future: rules not yet active; invalid: unreadable active_from (ignored).
+ * @throws {Error} When asOf is not a readable date.
+ */
+export function effectiveTaxRules(taxRules, asOf) {
+    const now = utcMillis(asOf);
+    if (Number.isNaN(now)) throw new Error(`effectiveTaxRules: unreadable snapshot time "${asOf}"`);
+    const at = r => (r.active_from === null || r.active_from === undefined ? -Infinity : utcMillis(r.active_from));
+    const invalid = taxRules.filter(r => Number.isNaN(at(r)));
+    const future = taxRules.filter(r => at(r) > now);
+    const current = taxRules.filter(r => at(r) <= now);
+    const groups = new Map();
+    for (const r of current) {
+        const key = `${r.type}|${r.country_id}|${r.tax_id}`;
+        groups.set(key, [...(groups.get(key) ?? []), r]);
+    }
+    const byNewestThenId = (a, b) => at(b) - at(a) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const ranked = [...groups.values()].map(list => list.toSorted(byNewestThenId));
+    return {
+        rules: ranked.map(list => list[0]),
+        future,
+        invalid,
+        duplicates: ranked.filter(list => list.length > 1).map(list => ({
+            type: list[0].type,
+            country_id: list[0].country_id,
+            tax_id: list[0].tax_id,
+            rules: list.length,
+            chosen: list[0].id,
+            ambiguous: at(list[0]) === at(list[1]),
+        })),
+    };
 }
