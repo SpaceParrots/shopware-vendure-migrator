@@ -9,7 +9,8 @@
     "transform": "node src/cli.mjs transform",
     "load": "node src/cli.mjs load",
     "verify": "node src/cli.mjs verify",
-    "all": "node src/cli.mjs all"
+    "all": "node src/cli.mjs all",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=22"

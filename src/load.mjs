@@ -1,6 +1,7 @@
 // Stage 5: write the intermediate model into Vendure through the Admin API.
 // Every create is bound (source -> target id) before moving on; anything already bound is
 // skipped, so a re-run after a failure continues instead of duplicating.
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Bindings } from './lib/bindings.mjs';
 import { log, slugify, uniqueCoder, writeJson, readJson } from './lib/util.mjs';
@@ -20,6 +21,19 @@ async function pool(items, size, worker) {
     await Promise.all(runners);
 }
 
+/**
+ * Load journals of every snapshot, oldest first, with the current one last. `all` starts a new
+ * snapshot per run, so the bindings a crashed run did not flush sit in an older snapshot.
+ */
+async function loadJournals(outDir, snapshotDir) {
+    const dir = path.join(outDir, 'snapshots');
+    const others = (await fs.readdir(dir).catch(() => []))
+        .sort()
+        .map(name => path.join(dir, name))
+        .filter(d => path.resolve(d) !== path.resolve(snapshotDir));
+    return [...others, snapshotDir].map(d => path.join(d, 'load-journal.ndjson'));
+}
+
 export async function load(config, snapshotDir) {
     const model = await readJson(path.join(snapshotDir, 'model.json'));
     const client = new VendureClient(config.target);
@@ -27,6 +41,7 @@ export async function load(config, snapshotDir) {
     const bindings = await new Bindings(
         path.join(config.outDir, 'bindings.json'),
         path.join(snapshotDir, 'load-journal.ndjson'),
+        await loadJournals(config.outDir, snapshotDir),
     ).load();
     const lang = model.defaultLanguageCode;
     const failures = [];
