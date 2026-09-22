@@ -78,11 +78,17 @@ async function vendureVariants(client) {
  * Compares every model offer with Shopware's Admin API (resolved base price, tax, active flag),
  * the Store API (name, guest price) and the Vendure variant bound to it. Prices are compared in
  * the channel mode, `model.pricesIncludeTax`: gross when the channel shows gross prices, else net.
+ *
+ * Offers transform refused on purpose (gaps.problems.refusedOffers) are counted in
+ * `refusedOffers`. Load does not create them, so one missing in Vendure is expected and not
+ * compared; one that is in Vendure anyway is compared like any other offer.
+ * @param {{ refusedSourceIds?: Set<string> }} input Besides the model, bindings and the three
+ *   API results: the source ids of the refused offers.
  * @returns {{ r: object, guestTier1: Map<string, number|null> }} `r` holds the counts and lists
  *   of the report, and `priceField` ('gross' or 'net'); `guestTier1` the observed quantity-1 rule
  *   price per product, or null.
  */
-export function compareOffers({ model, bindings, admin, store, vendure }) {
+export function compareOffers({ model, bindings, admin, store, vendure, refusedSourceIds = new Set() }) {
     const adminById = new Map(admin.map(p => [p.id, p]));
     const storeById = new Map(store.map(p => [p.id, p]));
     const vendureById = new Map(vendure.map(v => [String(v.id), v]));
@@ -91,6 +97,7 @@ export function compareOffers({ model, bindings, admin, store, vendure }) {
     const vendurePrice = v => (model.pricesIncludeTax ? v.priceWithTax : v.price);
     const r = {
         compared: 0,
+        refusedOffers: 0,
         priceField: model.pricesIncludeTax ? 'gross' : 'net',
         resolver: { basePriceMismatch: [], taxMismatch: [], activeMismatch: [], missingInAdminApi: [], missingInVendure: [] },
         names: { mismatch: [], notInStoreApi: 0 },
@@ -102,6 +109,11 @@ export function compareOffers({ model, bindings, admin, store, vendure }) {
             const v = vendureById.get(bindings.get('product', o.sourceId, 'variant'));
             const a = adminById.get(o.sourceId);
             const s = storeById.get(o.sourceId);
+            if (refusedSourceIds.has(o.sourceId)) {
+                r.refusedOffers++;
+                // A documented data problem, not a resolver mismatch; verify reports it as missing.
+                if (!v) continue;
+            }
             r.compared++;
             // Counted on its own: otherwise a missing variant only lowers the comparable counts.
             if (!v) r.resolver.missingInVendure.push(o.sku);
@@ -224,16 +236,18 @@ export function ruleSelection(guestTier1, tier1Rows, rules) {
 /**
  * Compares the model and Vendure with Shopware's own Admin and Store API and writes the report.
  *
- * Side effects: reads bindings.json and every snapshot's load journal read-only; logs in to
+ * Side effects: reads model.json, gaps.json, bindings.json and every snapshot's load journal
+ * read-only; logs in to
  * Shopware and Vendure; reads the `product_price` and `rule` tables; writes
  * `<snapshot>/oracle-report.json`. Changes nothing in Shopware or Vendure.
  *
  * @param {ReturnType<import('./config.mjs').loadConfig>} config Needs the source database, the
  *   Shopware admin user and store access key, and Vendure.
- * @param {string} snapshotDir Snapshot holding model.json.
+ * @param {string} snapshotDir Snapshot holding model.json and gaps.json.
  * @param {{ client?: VendureClient, fetch?: typeof fetch, connect?: typeof mysql.createConnection }} [deps]
  *   Replacements for tests.
- * @returns {Promise<object>} The report. `resolverMismatches` counts every entry under `resolver`.
+ * @returns {Promise<object>} The report. `resolverMismatches` counts every entry under `resolver`;
+ *   offers in gaps.problems.refusedOffers are counted in `refusedOffers` instead.
  * @throws {Error} When a login fails, an API answers with an error, or bindings.json belongs to
  *   another Vendure.
  */
@@ -241,6 +255,8 @@ export async function oracle(config, snapshotDir, deps = {}) {
     const base = config.source.mediaBaseUrl.replace(/\/$/, '');
     const http = { ...config.http, ...(deps.fetch ? { fetch: deps.fetch } : {}) };
     const model = await readJson(path.join(snapshotDir, 'model.json'));
+    const gaps = await readJson(path.join(snapshotDir, 'gaps.json'));
+    const refusedSourceIds = new Set((gaps.problems?.refusedOffers ?? []).map(x => x.sourceId));
     const bindings = await openBindings(config, snapshotDir, { readOnly: true });
     const client = deps.client ?? new VendureClient(config.target, http);
     await client.login();
@@ -252,7 +268,7 @@ export async function oracle(config, snapshotDir, deps = {}) {
         vendureVariants(client),
     ]);
     log(`oracle: shopware admin ${admin.length}, store ${store.length}, vendure variants ${vendure.length}`);
-    const { r, guestTier1 } = compareOffers({ model, bindings, admin, store, vendure });
+    const { r, guestTier1 } = compareOffers({ model, bindings, admin, store, vendure, refusedSourceIds });
 
     const { tier1Rows, rules } = await rulePriceRows(deps.connect ?? mysql.createConnection, config.source, r.priceField);
     r.ruleSelection = ruleSelection(guestTier1, tier1Rows, rules);
@@ -269,7 +285,7 @@ export async function oracle(config, snapshotDir, deps = {}) {
         ...r,
     };
     await writeJson(path.join(snapshotDir, 'oracle-report.json'), result);
-    log(`oracle resolver (${r.priceField} prices): basePrice mismatches ${r.resolver.basePriceMismatch.length}, tax ${r.resolver.taxMismatch.length}, active ${r.resolver.activeMismatch.length}, missing in admin api ${r.resolver.missingInAdminApi.length}, missing in vendure ${r.resolver.missingInVendure.length}`);
+    log(`oracle resolver (${r.priceField} prices): basePrice mismatches ${r.resolver.basePriceMismatch.length}, tax ${r.resolver.taxMismatch.length}, active ${r.resolver.activeMismatch.length}, missing in admin api ${r.resolver.missingInAdminApi.length}, missing in vendure ${r.resolver.missingInVendure.length}; refused by transform ${r.refusedOffers} (not mismatches)`);
     log(`oracle names: mismatches ${r.names.mismatch.length}, not in store api ${r.names.notInStoreApi}`);
     log(`oracle guest price (${result.weekdayInShopTimezone}): comparable ${r.guestPrice.comparable}, equal ${r.guestPrice.equal}, different ${r.guestPrice.different} (higher in Shopware ${r.guestPrice.higherInShopware}, lower ${r.guestPrice.lowerInShopware}), max diff ${r.guestPrice.maxAbsDiffMinor}`);
     return result;

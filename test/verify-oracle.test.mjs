@@ -1,6 +1,6 @@
 // oracle against stubbed Shopware, Vendure and MySQL: a variant missing in Vendure is counted,
-// the SQL takes its constants as parameters, rule winners are tallied by id, and prices are
-// compared in the channel mode (gross or net).
+// the SQL takes its constants as parameters, rule winners are tallied by id, prices are compared
+// in the channel mode (gross or net), and offers transform refused are no resolver mismatch.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -17,7 +17,7 @@ const price = (gross, net) => [{ currencyId: SHOPWARE.CURRENCY, gross, net, link
  * One oracle run with two offers, p1 bound to V1 and p2 not bound. Shopware's base price is 11.90
  * gross, 10.00 net; the guest pays rule r1's tier-1 price, 9.90 gross or 8.32 net.
  */
-async function runOracle(t, { pricesIncludeTax }) {
+async function runOracle(t, { pricesIncludeTax, refused = [] }) {
     const outDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oracle-test-'));
     t.after(() => fs.rm(outDir, { recursive: true, force: true }));
     const snapshotDir = path.join(outDir, 'snapshots', '2026-09-22T10-00-00-000Z');
@@ -29,6 +29,9 @@ async function runOracle(t, { pricesIncludeTax }) {
             { sourceId: 'p1', kind: 'simple', offers: [offer('p1', 'ONE')] },
             { sourceId: 'p2', kind: 'simple', offers: [offer('p2', 'TWO')] },
         ],
+    }));
+    await fs.writeFile(path.join(snapshotDir, 'gaps.json'), JSON.stringify({
+        problems: { refusedOffers: refused.map(sourceId => ({ sku: sourceId.toUpperCase(), sourceId, reasons: ['no tax after inheritance'] })) },
     }));
     await fs.writeFile(path.join(outDir, 'bindings.json'), JSON.stringify({
         target: 'http://v/admin-api',
@@ -86,6 +89,26 @@ test('oracle counts variants missing in Vendure and tallies rule winners by id',
     const [tiers] = queries;
     assert.deepEqual(tiers.params, [`$.c${SHOPWARE.CURRENCY}.gross`, SHOPWARE.LIVE_VERSION]);
     assert.ok(!tiers.sql.includes(SHOPWARE.LIVE_VERSION) && !tiers.sql.includes(SHOPWARE.CURRENCY), 'constants are parameters, not SQL text');
+});
+
+test('an offer transform refused is counted apart, and its absence from Vendure is no resolver mismatch', async t => {
+    const { result } = await runOracle(t, { pricesIncludeTax: true, refused: ['p2'] });
+    assert.equal(result.refusedOffers, 1);
+    assert.deepEqual(result.resolver.missingInVendure, []);
+    assert.equal(result.resolverMismatches, 0);
+    assert.deepEqual(result.names.mismatch, []);
+    assert.equal(result.compared, 1);
+});
+
+test('a refused offer that is in Vendure anyway is still compared', () => {
+    const offer = { sourceId: 'p1', sku: 'ONE', priceGrossMinor: 1190, priceNetMinor: 1000, taxSourceId: 't19', enabled: true };
+    const model = { currencyDecimals: 2, pricesIncludeTax: true, families: [{ sourceId: 'p1', kind: 'simple', offers: [offer] }] };
+    const admin = [{ id: 'p1', price: price(11.9, 10), taxId: 't7', active: true }];
+    const vendure = [{ id: 'V1', price: 1000, priceWithTax: 1190 }];
+    const { r } = compareOffers({ model, bindings: { get: () => 'V1' }, admin, store: [], vendure, refusedSourceIds: new Set(['p1']) });
+    assert.equal(r.refusedOffers, 1);
+    assert.equal(r.compared, 1);
+    assert.deepEqual(r.resolver.taxMismatch, [{ sku: 'ONE', shopware: 't7', model: 't19' }]);
 });
 
 test('in a net channel oracle compares net base, guest and rule prices', async t => {
