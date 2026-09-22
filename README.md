@@ -45,27 +45,27 @@ cp .env.example .env
 
 Edit `.env`. Every variable has a one-line comment in `.env.example`. The npm scripts load `.env` if it exists; variables already set in the shell take precedence. If you call `node src/cli.mjs` directly, set the variables yourself or pass `--env-file=.env`.
 
-Each stage requires only the credentials it uses. `transform` needs none, since it connects to nothing. An empty value counts as unset. A stage with a missing credential or an invalid value stops before it does anything and names every problem at once.
+Each stage requires only the credentials it uses. `transform` needs none, since it connects to nothing. `all` runs extract, transform, load and verify, so it reads every variable those four read and requires the source database and Vendure credentials. The table lists the variables in the order of `.env.example`, which groups them by the stages that read them. An empty value counts as unset. A stage with a missing credential or an invalid value stops before it does anything and names every problem at once.
 
 | Variable | Default | Used by | Meaning |
 |---|---|---|---|
 | `SOURCE_DB_HOST` | `127.0.0.1` | extract, oracle | Host of the Shopware database. |
 | `SOURCE_DB_PORT` | `3306` | extract, oracle | Port of the Shopware database, an integer from 1 to 65535. |
 | `SOURCE_DB_NAME` | `shopware` | extract, oracle | Name of the Shopware database. |
-| `SOURCE_DB_USER` | none, required | extract, oracle, all | Database user; read access is enough. |
-| `SOURCE_DB_PASSWORD` | none, required | extract, oracle, all | Password of that user. |
-| `SOURCE_MEDIA_BASE_URL` | `http://localhost` | transform, oracle | Public base URL of the shop, http or https. `transform` builds the image URLs in `model.json` from it, which `load` then downloads. `oracle` calls the Admin and Store API under it. |
+| `SOURCE_DB_USER` | none, required | extract, oracle | Database user; read access is enough. |
+| `SOURCE_DB_PASSWORD` | none, required | extract, oracle | Password of that user. |
 | `SOURCE_LABEL` | `unlabelled` | extract | Free-text name of the source install, written into the extract manifest and from there into the verify report. |
+| `SOURCE_MEDIA_BASE_URL` | `http://localhost` | transform, oracle | Public base URL of the shop, http or https. `transform` builds the image URLs in `model.json` from it, which `load` then downloads. `oracle` calls the Admin and Store API under it. |
 | `SOURCE_ADMIN_USER` | none, required | oracle | Shopware admin user for the Admin API login. |
 | `SOURCE_ADMIN_PASSWORD` | none, required | oracle | Password of that admin user. |
 | `SOURCE_STORE_ACCESS_KEY` | none, required | oracle | Store API access key of the storefront sales channel. |
 | `VENDURE_ADMIN_API` | `http://localhost:3000/admin-api` | load, verify, oracle | URL of the Vendure Admin API, http or https. A trailing slash is dropped. `bindings.json` records it, and a different URL is refused. |
-| `VENDURE_USERNAME` | none, required | load, verify, oracle, all | Vendure administrator identifier. |
-| `VENDURE_PASSWORD` | none, required | load, verify, oracle, all | Password of that administrator. |
-| `TARGET_LABEL` | `unlabelled` | verify | Free-text name of the target install, written into the verify report. |
-| `VERIFY_JOB_WAIT_MINUTES` | `45` | verify | Minutes `verify` waits for the Vendure job queue to drain before it gives up. A number, 0 or more. |
+| `VENDURE_USERNAME` | none, required | load, verify, oracle | Vendure administrator identifier. |
+| `VENDURE_PASSWORD` | none, required | load, verify, oracle | Password of that administrator. |
 | `MIGRATOR_HTTP_TIMEOUT_SECONDS` | `30` | load, verify, oracle | Seconds one HTTP attempt may take, including reading the body. A number, 1 or more. |
 | `MIGRATOR_HTTP_RETRIES` | `3` | load, verify, oracle | Extra attempts after a timeout, a network error or HTTP 408, 425, 429, 500, 502, 503 or 504, with a wait of 500 ms that doubles each time. Only reads, logins and image downloads retry, never creates. An integer from 0 to 10. |
+| `TARGET_LABEL` | `unlabelled` | verify | Free-text name of the target install, written into the verify report. |
+| `VERIFY_JOB_WAIT_MINUTES` | `45` | verify | Minutes `verify` waits for the Vendure job queue to drain before it gives up. A number, 0 or more. |
 | `MIGRATOR_OUT_DIR` | `out` | every stage | Folder for snapshots and `bindings.json`, relative to the working directory. |
 
 ## Running
