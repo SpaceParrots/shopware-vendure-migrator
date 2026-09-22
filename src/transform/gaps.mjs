@@ -6,11 +6,11 @@ const FULL_VISIBILITY = 30; // ProductVisibilityDefinition::VISIBILITY_ALL
 
 /**
  * @param {object} raw Snapshot tables (rules, product_price_summary, currencies, product_configurator_settings).
- * @param {object} built { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats }.
+ * @param {object} built { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats, categoryIndexGaps }.
  * @returns {object} The gaps.json content. Keys read by verify: rulePrices, currencies, visibility,
  *   categories, closeout, configurator, seo, notInSlice. Never throws.
  */
-export function buildGaps(raw, { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats }) {
+export function buildGaps(raw, { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats, categoryIndexGaps }) {
     const allOffers = families.flatMap(f => f.offers);
     const ruleById = new Map(raw.rules.map(r => [r.id, r]));
     const isoByKey = new Map(raw.currencies.map(c => [`c${c.id}`, c.iso_code]));
@@ -57,6 +57,7 @@ export function buildGaps(raw, { families, collections, skippedLinks, redirects,
             hiddenInNavigation: collections.filter(c => c.hiddenInNavigation).length,
             verdict: 'dynamic (product stream) membership is not migrated; those collections are created empty',
         },
+        categoryIndex: categoryIndexGaps,
         closeout: {
             offers: allOffers.filter(o => o.isCloseout).length,
             verdict: 'is_closeout (do not sell when out of stock) maps to Vendure out-of-stock settings; not configured in this slice',

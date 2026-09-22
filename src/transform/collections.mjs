@@ -66,7 +66,8 @@ export function buildCollections(raw, ctx, offersByCategory) {
         collections,
         skippedLinks,
         decisions: [
-            { topic: 'collections', text: 'Each Shopware page or folder category becomes a Collection in the same tree position and sibling order. Membership uses a variant-id filter with inheritFilters=false, so a child category keeps exactly its own assignments instead of being intersected with the parent (Vendure\'s default).' },
+            { topic: 'collections', text: 'Each Shopware page or folder category becomes a Collection in the same tree position and sibling order. Membership uses a variant-id filter with inheritFilters=false, so a collection gets exactly its own member list instead of being intersected with the parent (Vendure\'s default).' },
+            { topic: 'collection membership', text: 'Members are the variants the Shopware storefront lists in the category. The category listing filters on product.categoriesRo (ProductListingRoute), which is the product_category_tree index: every category a product is assigned to plus all its ancestors. A variant without own index rows inherits its parent\'s. product_category (the direct assignment) stays on each offer as effectiveCategoryIds, for diagnostics only. Shopware\'s indexer writes the index; pairs missing there are missing in the storefront and in Vendure alike, see gaps.categoryIndex.' },
             { topic: 'collection visibility', text: 'category.active=false becomes isPrivate. category.visible=false (hidden from navigation) has no Vendure equivalent and is kept only in the model for the storefront to use.' },
         ],
     };
@@ -81,4 +82,42 @@ export function buildCollections(raw, ctx, offersByCategory) {
 export function offersByCategory(families, categoriesOf) {
     const pairs = families.flatMap(f => f.offers.flatMap(o => categoriesOf(o).map(categoryId => [categoryId, o.sourceId])));
     return new Map([...groupBy(pairs, ([categoryId]) => categoryId)].map(([categoryId, list]) => [categoryId, list.map(([, id]) => id)]));
+}
+
+/**
+ * How far Shopware's listing index (product_category_tree) is from the direct assignments
+ * (product_category plus ancestors). A stale index means the storefront lists fewer products than
+ * the admin shows; the migration follows the index, so those memberships are missing in Vendure too.
+ * @param {Array<{ id: string, parent_id: string|null, product_assignment_type: string, type: string }>} categories
+ * @param {object[]} families Output of buildFamilies (offers with effectiveCategoryIds and listingCategoryIds).
+ * @param {object[]} collections Output of buildCollections.
+ * @returns {{ offersAssignedButNotIndexed: number, membershipsFromIndex: number, membershipsIfIndexed: number, collectionsLosingMembers: number, verdict: string }} Never throws.
+ */
+export function categoryIndexGaps(categories, families, collections) {
+    const parentOf = new Map(categories.map(c => [c.id, c.parent_id]));
+    const withAncestors = ids => {
+        const out = new Set();
+        for (let id of ids) {
+            while (id && !out.has(id)) {
+                out.add(id);
+                id = parentOf.get(id);
+            }
+        }
+        return out;
+    };
+    const offers = families.flatMap(f => f.offers);
+    const collected = new Map(collections.filter(c => c.assignment === 'product').map(c => [c.sourceId, new Set()]));
+    for (const o of offers) for (const id of withAncestors(o.effectiveCategoryIds)) collected.get(id)?.add(o.sourceId);
+    const membershipsIfIndexed = [...collected.values()].reduce((n, set) => n + set.size, 0);
+    const membershipsFromIndex = collections.reduce((n, c) => n + c.offerSourceIds.length, 0);
+    const offersAssignedButNotIndexed = offers.filter(o => o.effectiveCategoryIds.length && !o.listingCategoryIds.length).length;
+    return {
+        offersAssignedButNotIndexed,
+        membershipsFromIndex,
+        membershipsIfIndexed,
+        collectionsLosingMembers: collections.filter(c => (collected.get(c.sourceId)?.size ?? 0) > c.offerSourceIds.length).length,
+        verdict: offersAssignedButNotIndexed
+            ? `${offersAssignedButNotIndexed} offers have category assignments but no product_category_tree rows, so the Shopware storefront lists them in no category and the migration does the same. If they should be listed, run bin/console dal:refresh:index on the source and extract again.`
+            : 'the listing index covers every assigned offer',
+    };
 }

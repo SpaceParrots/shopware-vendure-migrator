@@ -18,6 +18,7 @@ export function indexProducts(raw, storefront) {
         optionsOf: groupBy(raw.product_options, 'product_id'),
         propertiesOf: groupBy(raw.product_properties, 'product_id'),
         categoriesOf: groupBy(raw.product_categories, 'product_id'),
+        listingCategoriesOf: groupBy(raw.product_category_tree, 'product_id'),
         mediaOf: groupBy(raw.product_media, 'product_id'),
         productMediaById: new Map(raw.product_media.map(pm => [pm.id, pm])),
         // Unfiltered on purpose: own-or-parent is decided on all channels, the storefront filter comes after.
@@ -46,6 +47,9 @@ export function resolveOffer(row, parent, idx, pricing) {
     const manufacturer = inherit(row, parent, 'manufacturer_id');
     const active = inherit(row, parent, 'active');
     const categories = inheritRows(idx.categoriesOf, row, parent);
+    // The storefront lists a product in a category when product_category_tree (categoriesRo) has
+    // the pair; it holds every assigned category plus all ancestors.
+    const listing = inheritRows(idx.listingCategoriesOf, row, parent);
     const properties = inheritRows(idx.propertiesOf, row, parent);
     const problems = [];
 
@@ -80,6 +84,7 @@ export function resolveOffer(row, parent, idx, pricing) {
             optionSourceIds: (idx.optionsOf.get(row.id) ?? []).map(o => o.option_id),
             ownPropertyOptionIds: (idx.propertiesOf.get(row.id) ?? []).map(p => p.option_id),
             effectiveCategoryIds: categories.rows.map(c => c.category_id),
+            listingCategoryIds: listing.rows.map(c => c.category_id),
             mediaSourceIds: media.rows.toSorted(byPosition).map(m => m.media_id),
             coverMediaSourceId: cover?.media_id ?? null,
             storefrontVisibility: visibility.rows.filter(v => v.sales_channel_id === idx.storefrontId).map(v => v.visibility),
@@ -90,6 +95,7 @@ export function resolveOffer(row, parent, idx, pricing) {
             manufacturer: manufacturer.from,
             active: active.from,
             categories: categories.from,
+            listing: listing.from,
             properties: properties.from,
             media: media.from,
             cover: coverRef.from,
@@ -193,6 +199,7 @@ export function buildFamilies(raw, ctx) {
         manufacturerFromParent: count('manufacturer', 'parent'),
         activeFromParent: count('active', 'parent'),
         categoriesFromParent: count('categories', 'parent'),
+        listingCategoriesFromParent: count('listing', 'parent'),
         propertiesFromParent: count('properties', 'parent'),
         mediaFromParent: count('media', 'parent'),
         coverFromParent: count('cover', 'parent'),

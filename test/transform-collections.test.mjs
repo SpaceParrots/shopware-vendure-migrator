@@ -2,7 +2,7 @@
 // sibling order as a linked list, which real data breaks, and link categories have no Vendure form.
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { buildCollections, orderCategories } from '../src/transform/collections.mjs';
+import { buildCollections, categoryIndexGaps, offersByCategory, orderCategories } from '../src/transform/collections.mjs';
 
 const cat = (id, parent_id = null, after_category_id = null, extra = {}) => ({
     id,
@@ -68,5 +68,31 @@ describe('buildCollections', () => {
         const members = new Map([['manual', ['o1']], ['stream', ['o2']]]);
         const { collections } = buildCollections(raw(categories), ctx, members);
         assert.deepEqual(collections.map(c => c.offerSourceIds), [['o1'], []]);
+    });
+});
+
+describe('membership from the listing index', () => {
+    // root > food > fruit. o1 is assigned to fruit and indexed (fruit, food, root); o2 is assigned
+    // to food but the index has no rows for it, as after an import without the indexer.
+    const categories = [cat('root'), cat('food', 'root'), cat('fruit', 'food')];
+    const offer = (sourceId, effectiveCategoryIds, listingCategoryIds) => ({ sourceId, effectiveCategoryIds, listingCategoryIds });
+    const families = [{ offers: [offer('o1', ['fruit'], ['fruit', 'food', 'root']), offer('o2', ['food'], [])] }];
+
+    test('an offer is a member of every category its index rows name, ancestors included', () => {
+        const members = offersByCategory(families, o => o.listingCategoryIds);
+        assert.deepEqual([...members], [['fruit', ['o1']], ['food', ['o1']], ['root', ['o1']]]);
+    });
+
+    test('categoryIndexGaps counts assigned offers the index misses and the memberships they would add', () => {
+        const members = offersByCategory(families, o => o.listingCategoryIds);
+        const { collections } = buildCollections({ categories, category_translations: [] }, {
+            storefront: {}, translated: () => ({}), authored: () => ({}), categorySlugOf: () => '',
+        }, members);
+        const gaps = categoryIndexGaps(categories, families, collections);
+        assert.equal(gaps.offersAssignedButNotIndexed, 1);
+        assert.equal(gaps.membershipsFromIndex, 3);
+        assert.equal(gaps.membershipsIfIndexed, 5);
+        assert.equal(gaps.collectionsLosingMembers, 2);
+        assert.match(gaps.verdict, /^1 offers have category assignments but no product_category_tree rows/);
     });
 });

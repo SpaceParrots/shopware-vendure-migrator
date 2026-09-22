@@ -223,3 +223,26 @@ describe('visibility inheritance', () => {
         assert.equal(r.provenance.visibilityFromParent, 1);
     });
 });
+
+describe('listing categories', () => {
+    const tree = (product_id, category_id) => ({ product_id, category_id });
+    const raw = snapshot({
+        products: [product('p'), variant('v-none', 'p'), variant('v-own', 'p')],
+        product_categories: [{ product_id: 'p', category_id: 'fruit' }],
+        product_category_tree: [tree('p', 'fruit'), tree('p', 'food'), tree('v-own', 'sale')],
+    });
+    const r = build(raw);
+
+    test('a variant without own index rows takes the parent rows, including the ancestors', () => {
+        assert.deepEqual(offerOf(r, 'v-none').listingCategoryIds, ['fruit', 'food']);
+    });
+
+    test('own index rows replace the parent rows', () => {
+        assert.deepEqual(offerOf(r, 'v-own').listingCategoryIds, ['sale']);
+        assert.equal(r.provenance.listingCategoriesFromParent, 1);
+    });
+
+    test('the direct assignment is kept next to it for diagnostics', () => {
+        assert.deepEqual(offerOf(r, 'v-own').effectiveCategoryIds, ['fruit']);
+    });
+});

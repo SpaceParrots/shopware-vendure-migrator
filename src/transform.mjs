@@ -8,7 +8,7 @@ import { SHOPWARE } from './config.mjs';
 import { readSnapshot } from './lib/snapshot.mjs';
 import { log, writeJson } from './lib/util.mjs';
 import { buildAssets } from './transform/assets.mjs';
-import { buildCollections, offersByCategory } from './transform/collections.mjs';
+import { buildCollections, categoryIndexGaps, offersByCategory } from './transform/collections.mjs';
 import { buildFacets } from './transform/facets.mjs';
 import { buildGaps } from './transform/gaps.mjs';
 import { buildLanguages, languageGaps } from './transform/languages.mjs';
@@ -43,7 +43,7 @@ export function buildModel(raw, { mediaBaseUrl }) {
     const products = buildFamilies(raw, { ...ctx, pricing, productSlugOf: slugFromSeoOrName(productSeo) });
     const { families } = products;
     const facets = buildFacets(raw, ctx);
-    const membership = offersByCategory(families, o => o.effectiveCategoryIds);
+    const membership = offersByCategory(families, o => o.listingCategoryIds);
     const cols = buildCollections(raw, { ...ctx, categorySlugOf: slugFromSeoOrName(categorySeo) }, membership);
     const { collections } = cols;
     const assets = buildAssets(raw, families, mediaBaseUrl, ctx);
@@ -58,6 +58,7 @@ export function buildModel(raw, { mediaBaseUrl }) {
         taxGaps: tax.gaps,
         priceStats: products.priceStats,
         languageGaps: languageGaps(raw, lang.droppedLanguages),
+        categoryIndexGaps: categoryIndexGaps(raw.categories, families, collections),
     });
 
     const allOffers = families.flatMap(f => f.offers);
@@ -71,6 +72,7 @@ export function buildModel(raw, { mediaBaseUrl }) {
         facets: facets.facets.length,
         facetValues: facets.facets.reduce((n, f) => n + f.values.length, 0),
         collections: collections.length,
+        collectionMemberships: collections.reduce((n, c) => n + c.offerSourceIds.length, 0),
         assets: assets.filter(a => !a.private).length,
         countries: countries.length,
         taxZones: tax.taxZones.length,
