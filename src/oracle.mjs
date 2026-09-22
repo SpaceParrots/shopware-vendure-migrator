@@ -10,6 +10,7 @@ import { openBindings } from './lib/bindings.mjs';
 import { request } from './lib/http.mjs';
 import { log, readJson, toMinorUnits, writeJson } from './lib/util.mjs';
 import { VendureClient } from './lib/vendure-client.mjs';
+import { resolvePrice } from './transform/prices.mjs';
 
 const PAGE_ADMIN = 500;
 const PAGE_STORE = 100;
@@ -100,8 +101,11 @@ export function compareOffers({ model, bindings, admin, store, vendure }) {
             if (!a) { r.resolver.missingInAdminApi.push(o.sku); continue; }
 
             // Resolver check: Shopware's own inheritance vs the migrator's.
+            // Converted by transform's rule, so a linked sub-cent gross that transform rounds on
+            // purpose is not reported as a resolver mismatch; the check is about inheritance.
             const priceEntry = (a.price ?? []).find(p => p.currencyId === SHOPWARE.CURRENCY);
-            const shopwareGross = priceEntry ? toMinorUnits(priceEntry.gross).minor : null;
+            const pricing = { currencyId: SHOPWARE.CURRENCY, decimals: model.currencyDecimals ?? 2, pricesIncludeTax: true };
+            const shopwareGross = priceEntry ? resolvePrice({ [`c${SHOPWARE.CURRENCY}`]: priceEntry }, pricing).priceGrossMinor : null;
             if (shopwareGross !== o.priceGrossMinor || (v && v.priceWithTax !== shopwareGross)) {
                 r.resolver.basePriceMismatch.push({ sku: o.sku, shopware: shopwareGross, model: o.priceGrossMinor, vendure: v?.priceWithTax });
             }

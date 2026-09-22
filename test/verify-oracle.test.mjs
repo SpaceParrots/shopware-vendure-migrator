@@ -7,7 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { SHOPWARE } from '../src/config.mjs';
 import { Bindings } from '../src/lib/bindings.mjs';
-import { oracle } from '../src/oracle.mjs';
+import { compareOffers, oracle } from '../src/oracle.mjs';
 
 const json = body => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 const price = gross => [{ currencyId: SHOPWARE.CURRENCY, gross }];
@@ -74,4 +74,19 @@ test('oracle counts variants missing in Vendure and tallies rule winners by id',
     const [tiers] = queries;
     assert.deepEqual(tiers.params, [`$.c${SHOPWARE.CURRENCY}.gross`, SHOPWARE.LIVE_VERSION]);
     assert.ok(!tiers.sql.includes(SHOPWARE.LIVE_VERSION) && !tiers.sql.includes(SHOPWARE.CURRENCY), 'constants are parameters, not SQL text');
+});
+
+test('compareOffers converts the Admin API gross by the transform rule: a linked sub-cent gross is rounded, not a mismatch', () => {
+    const offer = (sourceId, sku, priceGrossMinor) => ({ sourceId, sku, priceGrossMinor, taxSourceId: 't19', enabled: true });
+    const model = {
+        currencyDecimals: 2,
+        families: [{ sourceId: 'p1', kind: 'simple', offers: [offer('p1', 'LINKED', 1232)] }, { sourceId: 'p2', kind: 'simple', offers: [offer('p2', 'UNLINKED', 1232)] }],
+    };
+    const bindings = { get: (kind, id) => ({ p1: 'V1', p2: 'V2' })[id] };
+    const entry = linked => [{ currencyId: SHOPWARE.CURRENCY, gross: 12.3165, net: 10.35, linked }];
+    const admin = [{ id: 'p1', price: entry(true), taxId: 't19', active: true }, { id: 'p2', price: entry(false), taxId: 't19', active: true }];
+    const vendure = [{ id: 'V1', priceWithTax: 1232 }, { id: 'V2', priceWithTax: 1232 }];
+    const { r } = compareOffers({ model, bindings, admin, store: [], vendure });
+    // UNLINKED is a real mismatch: transform refuses its sub-cent gross, so the model could not hold 1232.
+    assert.deepEqual(r.resolver.basePriceMismatch.map(m => m.sku), ['UNLINKED']);
 });
