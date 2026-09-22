@@ -5,7 +5,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { SHOPWARE } from './config.mjs';
-import { log, readJson, writeJson } from './lib/util.mjs';
+import { readSnapshot } from './lib/snapshot.mjs';
+import { log, writeJson } from './lib/util.mjs';
 import { buildAssets } from './transform/assets.mjs';
 import { buildCollections, offersByCategory } from './transform/collections.mjs';
 import { buildFacets } from './transform/facets.mjs';
@@ -94,29 +95,16 @@ export function buildModel(raw, { mediaBaseUrl }) {
 }
 
 /**
- * Reads the raw tables of a snapshot.
- * @param {string} snapshotDir
- * @returns {Promise<Record<string, unknown[]>>}
- * @throws {Error} When raw/ cannot be read or a file is not valid JSON.
- */
-async function readRaw(snapshotDir) {
-    const raw = {};
-    for (const file of await fs.readdir(path.join(snapshotDir, 'raw'))) {
-        raw[file.replace(/\.json$/, '')] = await readJson(path.join(snapshotDir, 'raw', file));
-    }
-    return raw;
-}
-
-/**
  * Stage entry point: reads the snapshot, builds the model and writes model.json, decisions.json,
  * gaps.json, diagnostics.json and redirects.csv into the snapshot folder.
  * @param {{ source: { mediaBaseUrl: string } }} config
  * @param {string} snapshotDir
  * @returns {Promise<object>} The model.
- * @throws {Error} See buildModel and readRaw; also when an output file cannot be written.
+ * @throws {Error} When the snapshot fails the manifest check (readSnapshot), see buildModel, and
+ *   when an output file cannot be written.
  */
 export async function transform(config, snapshotDir) {
-    const raw = await readRaw(snapshotDir);
+    const { raw } = await readSnapshot(snapshotDir);
     const { model, decisions, gaps, diagnostics, redirects } = buildModel(raw, { mediaBaseUrl: config.source.mediaBaseUrl });
     await writeJson(path.join(snapshotDir, 'model.json'), model);
     await writeJson(path.join(snapshotDir, 'decisions.json'), decisions);
