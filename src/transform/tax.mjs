@@ -3,16 +3,20 @@ import { groupTaxZones } from '../lib/resolve.mjs';
 import { groupBy } from '../lib/util.mjs';
 
 /**
- * Picks the storefront sales channel whose catalogue is migrated.
- * @param {Array<{ type_id: string }>} salesChannels Rows of raw/sales_channels.json.
+ * Picks the storefront sales channel whose catalogue is migrated: the first active storefront in
+ * id order (extract sorts active channels first, then by id; this does not rely on that).
+ * @param {Array<{ id: string, type_id: string, active: unknown }>} salesChannels Rows of raw/sales_channels.json.
  * @param {string} storefrontTypeId Shopware's Defaults::SALES_CHANNEL_TYPE_STOREFRONT.
  * @returns {object} The sales channel row.
- * @throws {Error} When there is no storefront sales channel.
+ * @throws {Error} When there is no active storefront sales channel.
  */
 export function pickStorefront(salesChannels, storefrontTypeId) {
-    const storefront = salesChannels.find(sc => sc.type_id === storefrontTypeId);
-    if (!storefront) throw new Error('No storefront sales channel found.');
-    return storefront;
+    const storefronts = salesChannels.filter(sc => sc.type_id === storefrontTypeId);
+    const active = storefronts.filter(sc => Number(sc.active) === 1).toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    if (!active.length) {
+        throw new Error(`No active storefront sales channel found (${storefronts.length} storefront channels, all inactive). Activate one in Shopware or check the source database.`);
+    }
+    return active[0];
 }
 
 /**
