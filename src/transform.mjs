@@ -13,8 +13,9 @@ import { buildFacets } from './transform/facets.mjs';
 import { buildGaps } from './transform/gaps.mjs';
 import { buildLanguages, languageGaps } from './transform/languages.mjs';
 import { currencyDecimals } from './transform/prices.mjs';
-import { buildFamilies, slugFromSeoOrName } from './transform/products.mjs';
+import { buildFamilies } from './transform/products.mjs';
 import { buildRedirects, redirectsCsv, seoPaths } from './transform/redirects.mjs';
+import { slugFromSeoOrName, uniqueSlugsPerLanguage } from './transform/slugs.mjs';
 import { buildCountries, buildTax, pickStorefront } from './transform/tax.mjs';
 
 /**
@@ -41,18 +42,19 @@ export function buildModel(raw, { mediaBaseUrl }) {
     const productSeo = seoPaths(raw.seo_urls, 'frontend.detail.page', ctx);
     const categorySeo = seoPaths(raw.seo_urls, 'frontend.navigation.page', ctx);
     const products = buildFamilies(raw, { ...ctx, pricing, productSlugOf: slugFromSeoOrName(productSeo) });
-    const { families } = products;
+    const families = uniqueSlugsPerLanguage(products.families);
     const facets = buildFacets(raw, ctx);
     const membership = offersByCategory(families, o => o.listingCategoryIds);
     const cols = buildCollections(raw, { ...ctx, categorySlugOf: slugFromSeoOrName(categorySeo) }, membership);
-    const { collections } = cols;
+    const collections = uniqueSlugsPerLanguage(cols.collections);
     const assets = buildAssets(raw, families, mediaBaseUrl, ctx);
-    const redirects = buildRedirects({ families, collections, productSeo, categorySeo });
+    const { redirects, unmatched: unmatchedSeoUrls } = buildRedirects({ seoUrls: raw.seo_urls, families, collections, ctx });
     const gaps = buildGaps(raw, {
         families,
         collections,
         skippedLinks: cols.skippedLinks,
         redirects,
+        unmatchedSeoUrls,
         problems: products.problems,
         familyIssues: products.familyIssues,
         taxGaps: tax.gaps,

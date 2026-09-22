@@ -1,6 +1,6 @@
 // Shopware products -> product families (Vendure Products) with their offers (ProductVariants).
 import { byLangMap, inherit, inheritRows } from '../lib/resolve.mjs';
-import { groupBy, slugify } from '../lib/util.mjs';
+import { groupBy } from '../lib/util.mjs';
 import { resolvePrice } from './prices.mjs';
 
 const byPosition = (a, b) => a.position - b.position || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -274,17 +274,4 @@ function familyIssuesOf(families, idx) {
             return issues;
         });
     });
-}
-
-/**
- * Slug lookup for products: the Shopware SEO URL of the storefront when there is one, otherwise
- * the slugified name.
- * @param {Map<string, string>} seoPathByKey `${productId}|${code}` -> seo_path_info.
- * @returns {(productId: string, code: string, name: string) => string} Never throws.
- */
-export function slugFromSeoOrName(seoPathByKey) {
-    return (id, code, name) => {
-        const seo = seoPathByKey.get(`${id}|${code}`);
-        return seo ? slugify(seo) : slugify(name);
-    };
 }

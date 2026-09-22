@@ -6,11 +6,11 @@ const FULL_VISIBILITY = 30; // ProductVisibilityDefinition::VISIBILITY_ALL
 
 /**
  * @param {object} raw Snapshot tables (rules, product_price_summary, currencies, product_configurator_settings).
- * @param {object} built { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats, categoryIndexGaps }.
+ * @param {object} built { families, collections, skippedLinks, redirects, unmatchedSeoUrls, problems, familyIssues, taxGaps, languageGaps, priceStats, categoryIndexGaps }.
  * @returns {object} The gaps.json content. Keys read by verify: rulePrices, currencies, visibility,
  *   categories, closeout, configurator, seo, notInSlice. Never throws.
  */
-export function buildGaps(raw, { families, collections, skippedLinks, redirects, problems, familyIssues, taxGaps, languageGaps, priceStats, categoryIndexGaps }) {
+export function buildGaps(raw, { families, collections, skippedLinks, redirects, unmatchedSeoUrls, problems, familyIssues, taxGaps, languageGaps, priceStats, categoryIndexGaps }) {
     const allOffers = families.flatMap(f => f.offers);
     const ruleById = new Map(raw.rules.map(r => [r.id, r]));
     const isoByKey = new Map(raw.currencies.map(c => [`c${c.id}`, c.iso_code]));
@@ -69,8 +69,11 @@ export function buildGaps(raw, { families, collections, skippedLinks, redirects,
         seo: {
             productsWithSeoUrl: new Set(redirects.filter(r => r.type === 'product').map(r => r.sourceId)).size,
             productsTotal: families.length,
+            variantsWithSeoUrl: new Set(redirects.filter(r => r.type === 'variant').map(r => r.sourceId)).size,
             categoriesWithSeoUrl: new Set(redirects.filter(r => r.type === 'category').map(r => r.sourceId)).size,
-            verdict: 'products without a Shopware SEO URL get a slug from their name; the source shop has not generated most SEO URLs',
+            redirects: redirects.length,
+            unmatchedSeoUrls,
+            verdict: 'every storefront SEO URL becomes a redirect (variants to their product, languages without own slug to the default-language slug); products without a Shopware SEO URL get a slug from their name; slugs are made unique per language; unmatchedSeoUrls counts SEO URLs whose product or category is not migrated',
         },
         notInSlice: ['customers', 'orders', 'CMS layouts (every category references one)', 'category media', 'manufacturer media and links', 'property option colours and media', 'cross-selling', 'product reviews', 'purchase and reference units', 'dimensions and weight'],
         problems: { ...problems, familyIssues },
