@@ -18,6 +18,13 @@ Stages:
              Writes oracle-report.json.
   all        extract, transform, load and verify, on a new snapshot.
 
+  transform-sales  Customers and orders of a transformed snapshot. Writes sales-model.json,
+                   sales-decisions.json and sales-gaps.json.
+  load-sales       Write customers and orders into Vendure in-process (VENDURE_CONFIG),
+                   as finished historical records. Needs the catalogue loaded first.
+  verify-sales     Compare Vendure's customers and orders with Shopware, through the
+                   Admin and Shop API. Writes verify-sales-report.json.
+
 Flags:
   --snapshot <id>  Snapshot folder under <out>/snapshots/ for transform, load, verify
                    and oracle. Defaults to the newest. extract and all always start
@@ -51,7 +58,7 @@ async function main() {
     }
     // Checked before loadConfig, so a typo does not first complain about missing credentials.
     if (!STAGES.includes(stage)) {
-        throw new Error(`Unknown stage "${stage}". Use extract, transform, load, verify, oracle or all. See --help.`);
+        throw new Error(`Unknown stage "${stage}". Use ${STAGES.join(', ')}. See --help.`);
     }
 
     const config = loadConfig(stage);
@@ -76,6 +83,16 @@ async function main() {
         const report = await (await import('./verify.mjs')).verify(config, snapshotDir);
         const failed = report.checks.filter(x => !x.pass).length;
         if (failed) problems.push(`verify failed ${failed} of ${report.checks.length} checks (verify-report.json)`);
+    }
+    if (stage === 'transform-sales') await (await import('./transform-sales.mjs')).transformSales(config, snapshotDir);
+    if (stage === 'load-sales') {
+        const result = await (await import('./load-sales.mjs')).loadSales(config, snapshotDir);
+        if (result.failures.length) problems.push(`load-sales recorded ${result.failures.length} failures (load-sales-result.json)`);
+    }
+    if (stage === 'verify-sales') {
+        const report = await (await import('./verify-sales.mjs')).verifySales(config, snapshotDir);
+        const failed = report.checks.filter(x => !x.pass).length;
+        if (failed) problems.push(`verify-sales failed ${failed} of ${report.checks.length} checks (verify-sales-report.json)`);
     }
     if (stage === 'oracle') {
         const result = await (await import('./oracle.mjs')).oracle(config, snapshotDir);

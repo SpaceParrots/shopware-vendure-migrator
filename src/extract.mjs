@@ -5,6 +5,7 @@
 import mysql from 'mysql2/promise';
 import path from 'node:path';
 import { SHOPWARE } from './config.mjs';
+import { SALES_QUERIES } from './extract/sales-queries.mjs';
 import { SNAPSHOT_FORMAT } from './lib/snapshot.mjs';
 import { log, writeJson } from './lib/util.mjs';
 
@@ -132,6 +133,8 @@ const QUERIES = {
     // columns (UTC), so transform can tell which tax rules were active at extract time.
     source_identity: `SELECT VERSION() mysql_version, COUNT(*) migrations,
             MAX(creation_timestamp) newest_migration_timestamp, UTC_TIMESTAMP(3) utc_now FROM migration`,
+
+    ...SALES_QUERIES,
 };
 
 /**
