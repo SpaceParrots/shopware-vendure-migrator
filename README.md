@@ -1,8 +1,8 @@
-# Shopware 6 to Vendure 3 catalogue migrator
+# Shopware 6 to Vendure 3 migrator
 
-A command-line tool that copies the product catalogue of a Shopware 6.7 shop into Vendure 3.7. It reads the Shopware database directly, resolves the values Shopware would show (variant inheritance, translation fallback, tax per country), writes an intermediate model to disk, and creates that model in Vendure through the Admin API. Two check stages then compare the result with the model and with Shopware's own APIs.
+A command-line tool that copies the product catalogue of a Shopware 6.7 shop into Vendure 3.7, and then its customers and order history. It reads the Shopware database directly, resolves the values Shopware would show (variant inheritance, translation fallback, tax per country), writes an intermediate model to disk, and creates that model in Vendure through the Admin API. Two check stages then compare the result with the model and with Shopware's own APIs.
 
-It was tested against Shopware 6.7.0.0 (the `dockware/dev` image with the demo-data plugin) and Vendure 3.7.3. Other versions may work, but the SQL in `src/extract.mjs` and the constants in `src/config.mjs` are written for 6.7.
+It was tested against Shopware 6.7.0.0 (the `dockware/dev` image with the demo-data plugin) and 6.7.14.2 (the `shopware/docker-dev` setup with `framework:demodata`), and Vendure 3.7.3. Other versions may work, but the SQL in `src/extract.mjs` and the constants in `src/config.mjs` are written for 6.7.
 
 The tool is experimental. It is meant to be read and adapted, not run unchanged against a production shop.
 
@@ -18,9 +18,33 @@ The tool is experimental. It is meant to be read and adapted, not run unchanged 
 - Product images and cover images. Private media are not uploaded.
 - Slugs. Shopware SEO URLs are reused where they exist, otherwise the slug comes from the name. Slugs are made unique per language. `redirects.csv` lists each old path with its new slug.
 
+## Customers and orders
+
+Three further stages carry customers and order history. They run after the catalogue is loaded, on a snapshot that `extract` wrote with this version (the customer and order tables are read in the same consistent snapshot as the catalogue).
+
+```sh
+npm run transform-sales   # after transform, same snapshot
+npm run load-sales        # after load
+npm run verify-sales
+```
+
+- **Customers.** One Vendure customer per email. A registered account is the primary row of its email; Shopware's per-checkout guest rows with the same email become that customer, or the oldest guest. Guests get no user. Registered customers get a user with their Shopware bcrypt hash, prefix `$2y$` rewritten to `$2b$`: Node's `bcrypt` answers `false` for `$2y$` without an error, so an unconverted hash fails every login silently. Shopware 5 legacy hashes and other schemes are not carried and are counted. Addresses, customer groups, customer number (custom field) and the Shopware id (custom field) are carried; salutation, birthday, company, VAT ids and newsletter state are counted in `sales-gaps.json`.
+- **Orders** are written as finished historical records: Shopware's order number as the code, its order date, line and discount amounts from the order's own price JSON, the customer and address snapshots, payments, full refunds and fulfillments. The three Shopware states (order, delivery, transaction) map through the table in `src/transform/order-states.mjs`; a combination it does not cover refuses the order, and the original triple is kept in the custom field `shopwareStates`. Promotion, credit and custom lines become surcharges, one per tax rate with Shopware's share. A product line without a Vendure variant (deleted product, or a parent product Shopware sold itself) points at one disabled placeholder variant, "Archived Shopware product". No stock movements, allocations, events or mails are created.
+- **Why in-process.** `load-sales` boots Vendure from `VENDURE_CONFIG` and writes through its TypeORM connection. The Admin API cannot do this: `createCustomer` always creates a user, publishes `AccountRegistrationEvent` and hashes a plain password; draft orders reprice every line, stamp today's date and a new code, and allocate stock.
+- **Totals.** Vendure's configured `OrderTaxCalculationStrategy` computes the stored order totals from the lines. Where that misses Shopware's invoice total, the invoice total is stored instead and listed in `load-sales-result.json` (`totalsFromInvoice`): Shopware computes a discount share's tax from the unrounded share, so a few orders differ by a cent, and the order total must equal the settled payment.
+
+The target Vendure config needs:
+
+- custom fields `Customer.shopwareId`, `Customer.customerNumber`, `Order.shopwareId`, `Order.shopwareStates`, `OrderLine.shopwareLineType`, `OrderLine.legacyLabel`, `OrderLine.legacyProductNumber` (all `string`, nullable);
+- a `MoneyStrategy` that rounds a half away from zero like PHP's `round()`. Vendure's default uses `Math.round`, which takes -16.745 to -16.74 where Shopware has -16.75;
+- the default `OrderTaxCalculationStrategy` (tax per line total, like Shopware's "horizontal" calculation). `OrderLevelTaxCalculationStrategy` rounds once per rate and matched Shopware on far fewer orders.
+
+`verify-sales` re-reads amounts, dates and emails from Shopware's MySQL and compares them with Vendure through the Admin API; with `VERIFY_LOGIN_PASSWORD` set it also logs every registered customer into the Shop API and compares their order history. `scripts/source-scenarios.mjs` prepares a demo shop for this (state transitions, guest orders, admin orders with custom and credit lines, deleted products); it writes to the shop.
+
 ## What it does not migrate
 
-- Customers, orders and CMS layouts.
+- CMS layouts.
+- Documents (invoices, delivery notes), partial captures and partial refunds as amounts (Shopware keeps those only in capture rows), returns, chargebacks, wishlists, newsletter subscriptions, tags. `sales-gaps.json` counts them.
 - Rule prices (Shopware's advanced prices). Only the base price is migrated. `transform` reports the rule prices in `gaps.json` with row and rule counts, and `oracle` measures how far the guest price in Shopware differs from the Vendure price. `sketches/shopware-rule-prices/` holds a sketch of a Vendure plugin that could close this gap. It was never run and is not part of the migrator.
 - List prices (the struck-through price). Vendure has no field for them; `gaps.json` counts them.
 - Category media, manufacturer media and links, property option colours and media, cross-selling, product reviews, purchase and reference units, dimensions and weight.

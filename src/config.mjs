@@ -11,6 +11,9 @@ const STAGE_NEEDS = {
     verify: ['vendure'],
     oracle: ['sourceDb', 'vendure', 'shopwareApi'],
     all: ['sourceDb', 'vendure'],
+    'transform-sales': [],
+    'load-sales': ['vendure', 'vendureConfig'],
+    'verify-sales': ['vendure', 'sourceDb'],
 };
 export const STAGES = Object.keys(STAGE_NEEDS);
 
@@ -18,6 +21,7 @@ const CREDENTIALS = {
     sourceDb: ['SOURCE_DB_USER', 'SOURCE_DB_PASSWORD'],
     vendure: ['VENDURE_USERNAME', 'VENDURE_PASSWORD'],
     shopwareApi: ['SOURCE_ADMIN_USER', 'SOURCE_ADMIN_PASSWORD', 'SOURCE_STORE_ACCESS_KEY'],
+    vendureConfig: ['VENDURE_CONFIG'],
 };
 
 /**
@@ -92,6 +96,9 @@ export function loadConfig(stage, env = process.env) {
             username: credential('VENDURE_USERNAME'),
             password: credential('VENDURE_PASSWORD'),
             label: read('TARGET_LABEL') ?? 'unlabelled',
+            // Path of the target's Vendure config module. load-sales boots Vendure in-process with
+            // it, so it must be the config the server runs with (same database, same custom fields).
+            configPath: credential('VENDURE_CONFIG'),
         },
         http: {
             timeoutMs: number('MIGRATOR_HTTP_TIMEOUT_SECONDS', 30, { min: 1 }) * 1000,

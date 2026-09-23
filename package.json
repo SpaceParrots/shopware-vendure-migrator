@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Command-line tool that migrates the product catalogue of a Shopware 6.7 shop into Vendure 3.7 and verifies the result.",
+  "description": "Command-line tool that migrates the product catalogue, customers and orders of a Shopware 6.7 shop into Vendure 3.7 and verifies the result.",
   "scripts": {
     "help": "node src/cli.mjs --help",
     "extract": "node --env-file-if-exists=.env src/cli.mjs extract",
@@ -12,6 +12,9 @@
     "verify": "node --env-file-if-exists=.env src/cli.mjs verify",
     "oracle": "node --env-file-if-exists=.env src/cli.mjs oracle",
     "all": "node --env-file-if-exists=.env src/cli.mjs all",
+    "transform-sales": "node --env-file-if-exists=.env src/cli.mjs transform-sales",
+    "load-sales": "node --env-file-if-exists=.env src/cli.mjs load-sales",
+    "verify-sales": "node --env-file-if-exists=.env src/cli.mjs verify-sales",
     "test": "node --test"
   },
   "engines": {

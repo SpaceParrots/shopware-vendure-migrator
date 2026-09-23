@@ -5,6 +5,7 @@
 import mysql from 'mysql2/promise';
 import path from 'node:path';
 import { SHOPWARE } from './config.mjs';
+import { SALES_QUERIES } from './extract/sales-queries.mjs';
 import { SNAPSHOT_FORMAT } from './lib/snapshot.mjs';
 import { log, writeJson } from './lib/util.mjs';
 
@@ -98,7 +99,8 @@ const QUERIES = {
             name, position
         FROM property_group_option_translation ORDER BY ${hex('property_group_option_id')}, ${hex('language_id')}`,
 
-    manufacturers: `SELECT ${hex('id')} id, link, ${hex('media_id')} media_id
+    // No link column: 6.7.x moved it to product_manufacturer_translation, and nothing reads it.
+    manufacturers: `SELECT ${hex('id')} id, ${hex('media_id')} media_id
         FROM product_manufacturer WHERE version_id = ${LIVE} ORDER BY ${hex('id')}`,
     manufacturer_translations: `SELECT ${hex('product_manufacturer_id')} manufacturer_id, ${hex('language_id')} language_id, name
         FROM product_manufacturer_translation WHERE product_manufacturer_version_id = ${LIVE}
@@ -131,6 +133,8 @@ const QUERIES = {
     // columns (UTC), so transform can tell which tax rules were active at extract time.
     source_identity: `SELECT VERSION() mysql_version, COUNT(*) migrations,
             MAX(creation_timestamp) newest_migration_timestamp, UTC_TIMESTAMP(3) utc_now FROM migration`,
+
+    ...SALES_QUERIES,
 };
 
 /**
