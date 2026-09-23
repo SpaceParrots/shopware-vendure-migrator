@@ -2,6 +2,9 @@
 // order state plus a state per payment and per fulfillment. The mapping is a table of rules, and a
 // combination no rule covers is refused, not guessed.
 
+/** The order states of Shopware's order.state machine; anything else is refused. */
+const ORDER_STATES = new Set(['open', 'in_progress', 'completed', 'cancelled']);
+
 /** Vendure payment state for the state of a Shopware transaction. */
 const PAYMENT = {
     paid: 'Settled',
@@ -38,6 +41,7 @@ const PAYMENT_NOTE = {
  */
 export function mapOrderStates({ order, delivery, transaction }) {
     const key = `${order}/${delivery ?? '-'}/${transaction ?? '-'}`;
+    if (!ORDER_STATES.has(order)) return { ok: false, reason: `${key}: unknown order state` };
     if (!transaction) return { ok: false, reason: `${key}: order without transaction` };
     if (transaction === 'chargeback') return { ok: false, reason: `${key}: chargebacks have no Vendure payment state` };
     const paymentState = PAYMENT[transaction];

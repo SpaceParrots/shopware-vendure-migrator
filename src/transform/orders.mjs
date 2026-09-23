@@ -40,6 +40,7 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
     const deliveriesByOrder = groupBy(raw.order_deliveries, 'order_id');
     const transactionsByOrder = groupBy(raw.order_transactions, 'order_id');
     const customerByOrder = new Map(raw.order_customers.map(c => [c.order_id, c]));
+    const customerIds = new Set(raw.customers.map(c => c.id));
     const addresses = new Map(raw.order_addresses.map(a => [a.id, a]));
     const payments = new Map(raw.payment_methods.map(p => [p.id, p]));
     const shippings = new Map(raw.shipping_methods.map(s => [s.id, s]));
@@ -61,7 +62,8 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
         nestedLines: 0,
         surchargesFromLines: 0,
         sharesNotSummingToLineTotal: 0,
-        guestOrdersWithoutCustomerRow: 0,
+        ordersWithoutCustomerRow: 0,
+        ordersOfRefusedCustomers: 0,
     };
 
     for (const o of raw.orders) {
@@ -87,9 +89,20 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
         if (!mapped.ok) { refuse(mapped.reason); continue; }
         for (const n of mapped.notes) gaps.approximations[n] = (gaps.approximations[n] ?? 0) + 1;
 
+        // An order whose customer did not become a Vendure customer is refused: the only one a
+        // channel could hold under that email is a different account (registeredEmailConflicts).
         const oc = customerByOrder.get(o.id);
         const customerSourceId = oc?.customer_id ? mergedInto[oc.customer_id] : undefined;
-        if (!customerSourceId) gaps.guestOrdersWithoutCustomerRow++;
+        if (!customerSourceId) {
+            if (!oc?.customer_id || !customerIds.has(oc.customer_id)) {
+                gaps.ordersWithoutCustomerRow++;
+                refuse(`customer ${oc?.customer_id ?? '(none)'} of the order no longer exists`);
+            } else {
+                gaps.ordersOfRefusedCustomers++;
+                refuse(`customer ${oc.customer_id} was not migrated (registered email conflict)`);
+            }
+            continue;
+        }
 
         try {
             const lines = [];
@@ -174,7 +187,6 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
                 sourceId: o.id,
                 code: o.order_number,
                 customerSourceId,
-                guestCustomer: customerSourceId ? undefined : { email: oc?.email, firstName: oc?.first_name, lastName: oc?.last_name },
                 state: mapped.orderState,
                 shopwareStates: stateKey,
                 notes: mapped.notes,
@@ -229,6 +241,11 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
             topic: 'orders.nonProductLines',
             decision: 'Promotion, credit and custom lines become surcharges, one per tax rate of the line, with the tax share Shopware calculated. Promotion codes go to couponCodes; no Vendure promotion is linked.',
             why: 'Vendure order lines need a product variant; a surcharge has exactly one tax rate, and Shopware spreads a discount across the rates in the cart.',
+        },
+        {
+            topic: 'orders.customer',
+            decision: 'An order whose customer did not become a Vendure customer is refused with its reason: the customer row is gone, or it is a second registered account on an email another account kept (registeredEmailConflicts).',
+            why: 'A Vendure order needs a customer, and the only customer the channel can hold under that email is a different account; attaching the order there would show it in a stranger\'s history.',
         },
         {
             topic: 'orders.totals',

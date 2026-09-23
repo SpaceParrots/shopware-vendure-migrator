@@ -13,12 +13,14 @@ import { VendureClient } from './lib/vendure-client.mjs';
 
 const LIVE = `UNHEX('${SHOPWARE.LIVE_VERSION}')`;
 const SAMPLE = 5;
+// mysql2 returns MariaDB JSON columns as text or as parsed objects depending on the server.
+const parse = json => (typeof json === 'string' ? JSON.parse(json) : json);
 
 const ORDER_FIELDS = `code state active orderPlacedAt total totalWithTax couponCodes
     customer { emailAddress }
     lines { quantity productVariant { sku } }
     surcharges { priceWithTax }
-    payments { method amount state refunds { total state } }
+    payments { id method amount state refunds { total state } }
     fulfillments { state }
     taxSummary { taxRate taxTotal }
     customFields { shopwareId shopwareStates }`;
@@ -29,7 +31,7 @@ async function sourceFacts(config) {
         database: config.source.database, dateStrings: true, supportBigNumbers: true, bigNumberStrings: true,
     });
     try {
-        const [orders] = await conn.query(`SELECT LOWER(HEX(o.id)) id, o.order_number, o.amount_total, o.amount_net, o.order_date_time, o.price,
+        const [orders] = await conn.query(`SELECT LOWER(HEX(o.id)) id, o.order_number, o.amount_total, o.amount_net, o.order_date_time, o.price, o.item_rounding,
                 oc.email, (SELECT COUNT(*) FROM order_line_item li WHERE li.order_id = o.id AND li.version_id = ${LIVE} AND li.type = 'product') product_lines
             FROM \`order\` o JOIN order_customer oc ON oc.order_id = o.id AND oc.version_id = ${LIVE}
             WHERE o.version_id = ${LIVE}`);
@@ -120,14 +122,16 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
         const v = byCode.get(code);
         const m = modelOrders.get(code);
         if (!v || !m) { amount.push({ code, problem: 'missing in Vendure or model' }); continue; }
-        const gross = toMinorUnits(s.amount_total).minor;
-        const net = toMinorUnits(s.amount_net).minor;
+        // The order's own rounding, as transform uses it.
+        const decimals = parse(s.item_rounding)?.decimals ?? 2;
+        const minor = x => toMinorUnits(x, decimals).minor;
+        const gross = minor(s.amount_total);
+        const net = minor(s.amount_net);
         if (v.totalWithTax !== gross || v.total !== net) {
             amount.push({ code, shopware: { gross, net }, vendure: { gross: v.totalWithTax, net: v.total } });
             centsOff += Math.abs(v.totalWithTax - gross);
         }
-        const price = typeof s.price === 'string' ? JSON.parse(s.price) : s.price;
-        const swTaxes = price.calculatedTaxes.map(t => ({ rate: Number(t.taxRate), tax: toMinorUnits(t.tax).minor })).filter(t => t.tax !== 0);
+        const swTaxes = parse(s.price).calculatedTaxes.map(t => ({ rate: Number(t.taxRate), tax: minor(t.tax) })).filter(t => t.tax !== 0);
         const vTaxes = v.taxSummary.map(t => ({ rate: t.taxRate, tax: t.taxTotal })).filter(t => t.tax !== 0);
         // Vendure's tax summary is computed from the lines at read time, so the known one-cent
         // share difference (see sales-decisions.json, orders.totals) shows up here per rate.
@@ -142,7 +146,8 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
         if (v.state !== m.state || fulfillment !== (m.fulfillment?.state ?? null) || v.customFields.shopwareStates !== m.shopwareStates) {
             states.push({ code, expected: [m.state, m.fulfillment?.state ?? null], actual: [v.state, fulfillment] });
         }
-        const last = v.payments[v.payments.length - 1];
+        // Created in Shopware's order, so the highest id is the latest; the API promises no order.
+        const last = [...v.payments].sort((a, b) => Number(a.id) - Number(b.id)).pop();
         const lastModel = m.payments[m.payments.length - 1];
         const refunded = last?.refunds.reduce((n, r) => n + r.total, 0) ?? 0;
         if (!last || last.state !== lastModel.state || last.amount !== gross || refunded !== (m.refund?.amount ?? 0)) {

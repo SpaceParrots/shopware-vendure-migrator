@@ -97,6 +97,7 @@ describe('mapOrderStates', () => {
         assert.equal(mapOrderStates({ order: 'completed', delivery: 'open', transaction: 'paid' }).ok, false);
         assert.equal(mapOrderStates({ order: 'cancelled', delivery: 'shipped', transaction: 'paid' }).ok, false);
         assert.equal(mapOrderStates({ order: 'open', delivery: 'open' }).ok, false);
+        assert.equal(mapOrderStates({ order: 'on_hold', delivery: 'open', transaction: 'paid' }).ok, false);
     });
 });
 
@@ -112,6 +113,7 @@ describe('buildOrders', () => {
         order_deliveries: [{ id: 'd1', order_id: 'o1', state: 'open', shipping_address_id: 'a1', shipping_method_id: 's1', tracking_codes: '[]' }],
         order_transactions: [{ id: 't1', order_id: 'o1', state: 'paid', payment_method_id: 'p1', amount: { totalPrice: 0 }, created_at: '2026-01-01 10:00:00.000' }],
         order_customers: [{ order_id: 'o1', customer_id: 'guest-2', email: 'x@example.com' }],
+        customers: [{ id: 'guest-1' }, { id: 'guest-2' }, { id: 'conflict' }],
         order_addresses: [{ id: 'a1', country_iso: 'DE', first_name: 'A', last_name: 'B', street: 'S 1', city: 'C', zipcode: '1' }],
         payment_methods: [{ id: 'p1', technical_name: 'payment_invoice', name: 'Invoice' }],
         shipping_methods: [{ id: 's1', technical_name: 'standard', name: 'Standard' }],
@@ -147,6 +149,20 @@ describe('buildOrders', () => {
         ]), ctx);
         assert.deepEqual(r.orders[0].surcharges.map(s => s.listPrice), [-1445, -4572]);
         assert.equal(r.gaps.sharesNotSummingToLineTotal, 1);
+    });
+
+    test('an order whose customer was not migrated is refused with the reason, never loaded ownerless', () => {
+        const product = { type: 'product', product_id: 'v1', label: 'P', quantity: 1, price: money(1, 1, [{ taxRate: 19, price: 1, tax: 0.16 }]) };
+        const refusedWith = customerId => {
+            const r = raw([product]);
+            r.order_customers[0].customer_id = customerId;
+            return buildOrders(r, ctx);
+        };
+        const conflict = refusedWith('conflict');
+        assert.equal(conflict.orders.length, 0);
+        assert.match(conflict.refused[0].reason, /registered email conflict/);
+        assert.equal(conflict.gaps.ordersOfRefusedCustomers, 1);
+        assert.match(refusedWith('deleted').refused[0].reason, /no longer exists/);
     });
 
     test('unmapped line types, nested lines and multi-rate product lines refuse the order', () => {
