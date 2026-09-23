@@ -98,6 +98,9 @@ describe('mapOrderStates', () => {
         assert.equal(mapOrderStates({ order: 'cancelled', delivery: 'shipped', transaction: 'paid' }).ok, false);
         assert.equal(mapOrderStates({ order: 'open', delivery: 'open' }).ok, false);
         assert.equal(mapOrderStates({ order: 'on_hold', delivery: 'open', transaction: 'paid' }).ok, false);
+        for (const delivery of ['shipped', 'shipped_partially', 'returned']) {
+            assert.equal(mapOrderStates({ order: 'completed', delivery, transaction: 'failed' }).ok, false, `${delivery} with a failed payment`);
+        }
     });
 });
 

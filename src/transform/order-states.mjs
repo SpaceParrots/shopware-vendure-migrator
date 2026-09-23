@@ -57,12 +57,16 @@ export function mapOrderStates({ order, delivery, transaction }) {
 
     // Placed orders from here on.
     const placedState = paymentState === 'Settled' ? 'PaymentSettled' : paymentState === 'Authorized' ? 'PaymentAuthorized' : null;
+    // Goods left the warehouse only on an authorised or settled payment; a shipped order with a
+    // declined payment has no consistent Vendure state.
+    if (!placedState && ['shipped', 'shipped_partially', 'returned', 'returned_partially'].includes(delivery)) {
+        return { ok: false, reason: `${key}: delivery ${delivery} with a declined payment` };
+    }
     switch (delivery) {
         case 'shipped':
             if (order === 'completed') return { ok: true, orderState: 'Delivered', paymentState, refund, fulfillmentState: 'Delivered', notes };
             return { ok: true, orderState: 'Shipped', paymentState, refund, fulfillmentState: 'Shipped', notes };
         case 'shipped_partially':
-            if (!placedState) return { ok: false, reason: `${key}: partly shipped with a declined payment` };
             // Shopware's partial states are flags: no position says which quantities left.
             return { ok: true, orderState: placedState, paymentState, refund, fulfillmentState: null,
                 notes: [...notes, 'partly shipped: Shopware records no shipped quantities, no fulfillment created'] };

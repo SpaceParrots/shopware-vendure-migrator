@@ -26,6 +26,22 @@ async function bootVendure(configPath) {
     return { core, app: app.app };
 }
 
+/**
+ * Creates the customers and orders of sales-model.json in Vendure.
+ *
+ * Side effects: boots Vendure from `config.target.configPath` (without job queue or HTTP server)
+ * and writes to its database directly, one transaction per customer and per order, publishing no
+ * events; creates customer groups, shipping methods and the placeholder product through Vendure's
+ * services; appends every binding to `<snapshot>/load-journal.ndjson`; writes
+ * `<outDir>/bindings.json` and `<snapshot>/load-sales-result.json`.
+ *
+ * @param {ReturnType<import('./config.mjs').loadConfig>} config
+ * @param {string} snapshotDir Snapshot folder holding sales-model.json.
+ * @returns {Promise<{ counts: object, timings: object, failures: object[], totalsFromInvoice: object[], bindings: number }>}
+ *   Items that failed are listed in `failures`, stay unbound, and are retried by the next run.
+ * @throws {Error} When sales-model.json cannot be read, bindings.json belongs to another Vendure,
+ *   or Vendure does not boot from the config.
+ */
 export async function loadSales(config, snapshotDir) {
     const startedAt = new Date().toISOString();
     const model = await readJson(path.join(snapshotDir, 'sales-model.json'));
@@ -153,8 +169,10 @@ export async function loadSales(config, snapshotDir) {
             for (const o of model.orders) {
                 if (bindings.get('order', o.sourceId, 'order')) { c.skipped++; continue; }
                 try {
-                    const id = await ds.transaction(m => writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings, totalsFromInvoice }));
+                    const { id, fromInvoice } = await ds.transaction(m => writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings }));
                     await bindings.set('order', o.sourceId, 'order', id);
+                    // Recorded after the commit, so a rolled-back order never shows up here.
+                    if (fromInvoice) totalsFromInvoice.push(fromInvoice);
                     c.created++;
                 } catch (e) { fail('orders', o.sourceId, e, c); }
             }
@@ -172,11 +190,14 @@ export async function loadSales(config, snapshotDir) {
 const taxLine = (rate, description) => [{ description: `${rate}%${description ? ` ${description}` : ''}`, taxRate: rate }];
 
 /**
- * Writes one order with its lines, surcharges, shipping line, payments, refund and fulfillment.
- * Totals are computed by Vendure's own entity getters, so the dashboard's line and order figures
- * agree; the compare stage measures how far they are from Shopware's invoice amounts.
+ * Writes one order with its lines, surcharges, shipping line, payments, refund and fulfillment,
+ * inside the caller's transaction.
+ * @returns {Promise<{ id: string|number, fromInvoice: object|null }>} `fromInvoice` describes the
+ *   totals when Shopware's invoice total was stored instead of Vendure's calculation.
+ * @throws {Error} When the customer or a variant is not bound, or the calculated totals miss the
+ *   invoice by more than one minor unit per surcharge.
  */
-async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings, totalsFromInvoice }) {
+async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings }) {
     const customerId = o.customerSourceId ? bindings.get('customer', o.customerSourceId, 'customer') : undefined;
     if (o.customerSourceId && !customerId) throw new Error(`customer ${o.customerSourceId} is not bound`);
     if (!customerId) throw new Error('order without a migrated customer');
@@ -212,9 +233,12 @@ async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholde
     const shipping = shippingLine.discountedPrice;
     const shippingWithTax = shippingLine.discountedPriceWithTax;
     const invoice = { subTotal: o.source.total - shipping, subTotalWithTax: o.source.totalWithTax - shippingWithTax };
-    const fromInvoice = calculated.subTotal !== invoice.subTotal || calculated.subTotalWithTax !== invoice.subTotalWithTax;
+    const drift = Math.max(Math.abs(calculated.subTotal - invoice.subTotal), Math.abs(calculated.subTotalWithTax - invoice.subTotalWithTax));
+    // The known cause is a cent per discount share (share rounding and its tax), so more than
+    // that is a mapping error: the order fails instead of the invoice hiding it.
+    if (drift > surcharges.length) throw new Error(`calculated totals miss the invoice by ${drift}, more than one per surcharge (${surcharges.length})`);
+    const fromInvoice = drift > 0 ? { code: o.code, calculated: [calculated.subTotalWithTax, calculated.subTotal], invoice: [invoice.subTotalWithTax, invoice.subTotal] } : null;
     const { subTotal, subTotalWithTax } = fromInvoice ? invoice : calculated;
-    if (fromInvoice) totalsFromInvoice.push({ code: o.code, calculated: [calculated.subTotalWithTax, calculated.subTotal], invoice: [invoice.subTotalWithTax, invoice.subTotal] });
 
     const order = await m.save(new core.Order({
         type: 'Regular', code: o.code, state: o.state, active: false, orderPlacedAt: placedAt,
@@ -261,5 +285,5 @@ async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholde
             await m.save(new core.FulfillmentLine({ fulfillment, orderLine: l, quantity: l.quantity }));
         }
     }
-    return order.id;
+    return { id: order.id, fromInvoice };
 }

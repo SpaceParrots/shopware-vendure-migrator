@@ -1,5 +1,6 @@
 // Customers and orders: resolves identities and maps each order to a finished Vendure record.
 // Runs after transform, on the same snapshot, because order lines point at the catalogue model.
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readSnapshot } from './lib/snapshot.mjs';
 import { log, readJson, writeJson } from './lib/util.mjs';
@@ -58,13 +59,22 @@ export function buildSalesModel(raw, catalogue) {
     return { model, decisions: [...customers.decisions, ...orders.decisions], gaps };
 }
 
+/**
+ * Stage entry point: reads the snapshot and its model.json, builds the sales model and writes
+ * sales-model.json, sales-decisions.json and sales-gaps.json into the snapshot folder.
+ * @param {object} config Unused; stages share one signature.
+ * @param {string} snapshotDir
+ * @returns {Promise<object>} The sales model.
+ * @throws {Error} When the snapshot fails the manifest check, lacks the customer and order tables,
+ *   has no model.json (transform did not run), or a file cannot be read or written.
+ */
 export async function transformSales(config, snapshotDir) {
     const { manifest, raw } = await readSnapshot(snapshotDir);
     const missing = SALES_RAW_FILES.filter(f => !manifest.files[f]);
     if (missing.length) throw new Error(`Snapshot ${path.basename(snapshotDir)} has no ${missing.join(', ')}; extract again with this migrator version.`);
-    const catalogue = await readJson(path.join(snapshotDir, 'model.json')).catch(() => {
-        throw new Error('model.json is missing: run transform on this snapshot first.');
-    });
+    const modelFile = path.join(snapshotDir, 'model.json');
+    if (!(await fs.stat(modelFile).catch(() => null))) throw new Error('model.json is missing: run transform on this snapshot first.');
+    const catalogue = await readJson(modelFile);
     const { model, decisions, gaps } = buildSalesModel(raw, catalogue);
     await writeJson(path.join(snapshotDir, 'sales-model.json'), model);
     await writeJson(path.join(snapshotDir, 'sales-decisions.json'), decisions);

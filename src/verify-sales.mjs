@@ -10,15 +10,16 @@ import { SHOPWARE } from './config.mjs';
 import { openBindings } from './lib/bindings.mjs';
 import { log, readJson, toMinorUnits, writeJson } from './lib/util.mjs';
 import { VendureClient } from './lib/vendure-client.mjs';
+import { normalizeEmail } from './transform/customers.mjs';
 
 const LIVE = `UNHEX('${SHOPWARE.LIVE_VERSION}')`;
 const SAMPLE = 5;
 // mysql2 returns MariaDB JSON columns as text or as parsed objects depending on the server.
 const parse = json => (typeof json === 'string' ? JSON.parse(json) : json);
 
-const ORDER_FIELDS = `code state active orderPlacedAt total totalWithTax couponCodes
+const ORDER_FIELDS = `code state active orderPlacedAt total totalWithTax shippingWithTax couponCodes
     customer { emailAddress }
-    lines { quantity productVariant { sku } }
+    lines { quantity linePriceWithTax productVariant { sku } }
     surcharges { priceWithTax }
     payments { id method amount state refunds { total state } }
     fulfillments { state }
@@ -53,25 +54,43 @@ async function all(client, field, fields) {
     }
 }
 
-/** Logs a customer into the Shop API and reads their order history; null when the login fails. */
-async function shopLogin(shopApi, email, password) {
+/** One Shop API request; throws on a non-2xx answer or after the timeout. */
+async function shopRequest(shopApi, timeoutMs, query, variables, token) {
     const res = await fetch(shopApi, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query: `mutation($u: String!, $p: String!) { login(username: $u, password: $p) {
-            ... on CurrentUser { id } ... on ErrorResult { errorCode } } }`, variables: { u: email, p: password } }),
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ query, variables }),
+        signal: AbortSignal.timeout(timeoutMs),
     });
-    const body = await res.json();
-    if (!body.data?.login?.id) return null;
-    const token = res.headers.get('vendure-auth-token');
-    const me = await fetch(shopApi, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ query: '{ activeCustomer { orders(options: { take: 1 }) { totalItems } } activeOrder { id } }' }),
-    }).then(r => r.json());
-    return { orders: me.data?.activeCustomer?.orders.totalItems, activeOrder: me.data?.activeOrder };
+    if (!res.ok) throw new Error(`Shop API ${shopApi}: HTTP ${res.status}`);
+    return { body: await res.json(), token: res.headers.get('vendure-auth-token') };
 }
 
+/**
+ * Logs a customer into the Shop API and reads their order history.
+ * @returns {Promise<{ orders: number, activeOrder: object|null } | null>} null when the login is refused.
+ * @throws {Error} On a non-2xx answer or a timeout.
+ */
+async function shopLogin(shopApi, timeoutMs, email, password) {
+    const login = await shopRequest(shopApi, timeoutMs, `mutation($u: String!, $p: String!) { login(username: $u, password: $p) {
+        ... on CurrentUser { id } ... on ErrorResult { errorCode } } }`, { u: email, p: password });
+    if (!login.body.data?.login?.id) return null;
+    const me = await shopRequest(shopApi, timeoutMs, '{ activeCustomer { orders(options: { take: 1 }) { totalItems } } activeOrder { id } }', {}, login.token);
+    return { orders: me.body.data?.activeCustomer?.orders.totalItems, activeOrder: me.body.data?.activeOrder };
+}
+
+/**
+ * Compares Vendure's customers and orders with Shopware and writes verify-sales-report.json.
+ * Changes nothing in Shopware or Vendure (Shop API logins open sessions only).
+ *
+ * @param {ReturnType<import('./config.mjs').loadConfig>} config
+ * @param {string} snapshotDir Snapshot folder holding sales-model.json.
+ * @param {{ loginPassword?: string }} [options] Password every registered customer is expected to
+ *   log in with; the login checks are skipped without it.
+ * @returns {Promise<{ passed: number, failed: number, checks: object[] }>}
+ * @throws {Error} When sales-model.json cannot be read, the Vendure login or MySQL connection
+ *   fails, or an API answers with an error.
+ */
 export async function verifySales(config, snapshotDir, { loginPassword = process.env.VERIFY_LOGIN_PASSWORD } = {}) {
     const model = await readJson(path.join(snapshotDir, 'sales-model.json'));
     const bindings = await openBindings(config, snapshotDir, { readOnly: true });
@@ -96,8 +115,9 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
         const s = sourceCustomers.get(m.sourceId);
         const problems = [];
         if (!v) problems.push('missing in Vendure');
+        else if (!s) problems.push('no longer in Shopware');
         else {
-            if (v.emailAddress !== s.email.trim().toLowerCase()) problems.push(`email ${v.emailAddress} vs ${s.email}`);
+            if (v.emailAddress !== normalizeEmail(s.email)) problems.push(`email ${v.emailAddress} vs ${s.email}`);
             if (v.firstName !== s.first_name || v.lastName !== s.last_name) problems.push('name');
             if (Boolean(v.user) === Boolean(Number(s.guest))) problems.push(`user ${Boolean(v.user)} for guest=${s.guest}`);
             if (!Number(s.guest) && v.addresses.length !== Number(s.addresses)) problems.push(`addresses ${v.addresses.length} vs ${s.addresses}`);
@@ -111,17 +131,24 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
 
     // ----- orders
     const orders = await all(client, 'orders', ORDER_FIELDS);
-    const byCode = new Map(orders.map(o => [o.code, o]));
+    const byShopwareOrderId = new Map(orders.map(o => [o.customFields.shopwareId, o]));
     check('orders.count', orders.length === model.expected.orders ? [] : [{ expected: model.expected.orders, actual: orders.length }], 1);
     check('orders.noneActive', orders.filter(o => o.active).map(o => ({ code: o.code })), orders.length);
-    const sourceOrders = new Map(source.orders.map(o => [o.order_number, o]));
-    const modelOrders = new Map(model.orders.map(o => [o.code, o]));
-    const amount = [], taxes = [], taxOneCent = [], dates = [], owners = [], shapes = [], states = [], payments = [];
+    const sourceOrders = new Map(source.orders.map(o => [o.id, o]));
+    const modelIds = new Set(model.orders.map(o => o.sourceId));
+    // Refused in transform, or placed after the snapshot: listed, not compared.
+    const notInModel = source.orders.filter(o => !modelIds.has(o.id)).map(o => o.order_number);
+    const amount = [], sums = [], taxes = [], taxOneCent = [], dates = [], owners = [], shapes = [], states = [], payments = [];
     let centsOff = 0;
-    for (const [code, s] of sourceOrders) {
-        const v = byCode.get(code);
-        const m = modelOrders.get(code);
-        if (!v || !m) { amount.push({ code, problem: 'missing in Vendure or model' }); continue; }
+    for (const m of model.orders) {
+        const { code } = m;
+        const v = byShopwareOrderId.get(m.sourceId);
+        const s = sourceOrders.get(m.sourceId);
+        if (!v || !s) { amount.push({ code, problem: v ? 'no longer in Shopware' : 'missing in Vendure' }); continue; }
+        // Independent of the stored totals: what Vendure computes from the order's own lines,
+        // surcharges and shipping. load-sales allows one minor unit per surcharge (share rounding).
+        const parts = v.lines.reduce((n, l) => n + l.linePriceWithTax, 0) + v.surcharges.reduce((n, x) => n + x.priceWithTax, 0) + v.shippingWithTax;
+        if (Math.abs(parts - v.totalWithTax) > v.surcharges.length) sums.push({ code, parts, totalWithTax: v.totalWithTax });
         // The order's own rounding, as transform uses it.
         const decimals = parse(s.item_rounding)?.decimals ?? 2;
         const minor = x => toMinorUnits(x, decimals).minor;
@@ -140,7 +167,7 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
         if (worst > 1) taxes.push({ code, shopware: swTaxes, vendure: vTaxes });
         else if (worst === 1) taxOneCent.push(code);
         if (new Date(`${s.order_date_time}Z`).getTime() !== new Date(v.orderPlacedAt).getTime()) dates.push({ code, shopware: s.order_date_time, vendure: v.orderPlacedAt });
-        if (v.customer?.emailAddress !== s.email.trim().toLowerCase()) owners.push({ code, shopware: s.email, vendure: v.customer?.emailAddress });
+        if (v.customer?.emailAddress !== normalizeEmail(s.email)) owners.push({ code, shopware: s.email, vendure: v.customer?.emailAddress });
         if (v.lines.length !== Number(s.product_lines) || v.surcharges.length !== m.surcharges.length) shapes.push({ code, lines: [v.lines.length, Number(s.product_lines)], surcharges: [v.surcharges.length, m.surcharges.length] });
         const fulfillment = v.fulfillments[0]?.state ?? null;
         if (v.state !== m.state || fulfillment !== (m.fulfillment?.state ?? null) || v.customFields.shopwareStates !== m.shopwareStates) {
@@ -154,13 +181,21 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
             payments.push({ code, expected: [lastModel.state, gross, m.refund?.amount ?? 0], actual: last ? [last.state, last.amount, refunded] : null });
         }
     }
-    check('orders.totalsMatchShopware', amount, sourceOrders.size, { grossCentsOff: centsOff });
-    check('orders.taxPerRateWithinOneCentOfShopware', taxes, sourceOrders.size, { oneCentDeviations: taxOneCent.length, oneCentSamples: taxOneCent.slice(0, SAMPLE) });
-    check('orders.placedAtMatchesShopware', dates, sourceOrders.size);
-    check('orders.customerMatchesShopware', owners, sourceOrders.size);
-    check('orders.lineAndSurchargeCounts', shapes, sourceOrders.size);
-    check('orders.statesAsMapped', states, sourceOrders.size);
-    check('orders.paymentsAndRefunds', payments, sourceOrders.size);
+    const loadResult = await readJson(path.join(snapshotDir, 'load-sales-result.json')).catch(() => null);
+    const compared = model.orders.length;
+    check('orders.totalsMatchShopware', amount, compared, {
+        grossCentsOff: centsOff,
+        totalsFromInvoice: loadResult?.totalsFromInvoice?.length ?? null,
+        notInModel: notInModel.length,
+        notInModelSamples: notInModel.slice(0, SAMPLE),
+    });
+    check('orders.partsAddUpToTotal', sums, compared);
+    check('orders.taxPerRateWithinOneCentOfShopware', taxes, compared, { oneCentDeviations: taxOneCent.length, oneCentSamples: taxOneCent.slice(0, SAMPLE) });
+    check('orders.placedAtMatchesShopware', dates, compared);
+    check('orders.customerMatchesShopware', owners, compared);
+    check('orders.lineAndSurchargeCounts', shapes, compared);
+    check('orders.statesAsMapped', states, compared);
+    check('orders.paymentsAndRefunds', payments, compared);
     const placeholderLines = orders.flatMap(o => o.lines).filter(l => l.productVariant.sku === 'SHOPWARE-ARCHIVED').length;
     check('orders.placeholderLines', placeholderLines === model.expected.placeholderLines ? [] : [{ expected: model.expected.placeholderLines, actual: placeholderLines }], 1);
 
@@ -175,13 +210,13 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
         const registered = model.customers.filter(c => !c.guest && c.passwordHash);
         const logins = [];
         for (const c of registered) {
-            const r = await shopLogin(shopApi, c.email, loginPassword);
+            const r = await shopLogin(shopApi, config.http.timeoutMs, c.email, loginPassword);
             const expectedOrders = ordersPerCustomer.get(c.sourceId) ?? 0;
             if (!r) logins.push({ email: c.email, problem: 'login failed' });
             else if (r.orders !== expectedOrders || r.activeOrder) logins.push({ email: c.email, orders: [r.orders, expectedOrders], activeOrder: r.activeOrder });
         }
         check('shop.loginAndOrderHistory', logins, registered.length);
-        const wrong = registered.length ? await shopLogin(shopApi, registered[0].email, `${loginPassword}-wrong`) : null;
+        const wrong = registered.length ? await shopLogin(shopApi, config.http.timeoutMs, registered[0].email, `${loginPassword}-wrong`) : null;
         check('shop.wrongPasswordRefused', wrong ? [{ email: registered[0].email }] : [], 1);
     } else {
         log('verify-sales: VERIFY_LOGIN_PASSWORD not set, login checks skipped');
