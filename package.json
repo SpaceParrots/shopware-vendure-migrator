@@ -2,8 +2,19 @@
   "name": "shopware-vendure-migrator",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "description": "Command-line tool that migrates the product catalogue, customers and orders of a Shopware 6.7 shop into Vendure 3.7 and verifies the result.",
+  "license": "MIT",
+  "author": "SpaceParrots",
+  "homepage": "https://github.com/kevmtt/shopware-vendure-migrator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kevmtt/shopware-vendure-migrator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kevmtt/shopware-vendure-migrator/issues"
+  },
+  "keywords": ["shopware", "shopware6", "vendure", "migration", "ecommerce", "cli"],
+  "type": "module",
   "scripts": {
     "help": "node src/cli.mjs --help",
     "extract": "node --env-file-if-exists=.env src/cli.mjs extract",
