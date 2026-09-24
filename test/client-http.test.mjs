@@ -30,7 +30,12 @@ test('a non-2xx status is reported with method, URL and status before any JSON p
 });
 
 test('a hanging server is cut off by the timeout', async () => {
-    const hang = (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+    // AbortSignal.timeout() is unref'd, and a stub holds no socket, so without this timer the event
+    // loop empties before the abort fires and node:test cancels the file.
+    const hang = (url, init) => new Promise((_, reject) => {
+        const keepAlive = setTimeout(() => {}, 10_000);
+        init.signal.addEventListener('abort', () => { clearTimeout(keepAlive); reject(init.signal.reason); });
+    });
     const { fetch } = stubFetch(hang);
     await assert.rejects(request('http://x/slow', { fetch, timeoutMs: 20 }), /GET http:\/\/x\/slow timed out after 20 ms/);
 });
