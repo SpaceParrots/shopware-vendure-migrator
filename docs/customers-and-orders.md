@@ -42,6 +42,14 @@ The Admin API cannot do this:
 - `createCustomer` always creates a user, publishes `AccountRegistrationEvent` and hashes a plain password. It cannot take an existing hash or create a guest.
 - Draft orders reprice every line, stamp today's date and a new code, and allocate stock.
 
+### Events and jobs
+
+Customers, their users and addresses, and the orders with everything they hold are saved as entities, not through Vendure's services. Vendure's event bus does not see them: no `AccountRegistrationEvent`, `OrderPlacedEvent` or state transition events, so no mails and no plugin reactions, and no history entries.
+
+Customer groups, shipping methods and the placeholder product do go through Vendure's services, which is what handles their translations and channels. They publish `CustomerGroupEvent`, `ShippingMethodEvent`, `ProductEvent` and `ProductVariantEvent`. The target's event subscribers run inside `load-sales`. Any job they add, such as a search index update, is written to the job queue, and the target's worker runs it later. TypeORM entity subscribers that the target registers run for every entity, including customers and orders.
+
+After `load-sales`, clean up the job queue and rebuild the search index; see [After the migration](vendure-target.md#after-the-migration).
+
 ### Totals
 
 Vendure's configured `OrderTaxCalculationStrategy` computes the stored order totals from the lines. Where that misses Shopware's invoice total, the invoice total is stored instead and listed in `load-sales-result.json` under `totalsFromInvoice`: Shopware computes a discount share's tax from the unrounded share, so a few orders differ by a cent, and the order total must equal the settled payment.
