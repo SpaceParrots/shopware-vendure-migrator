@@ -87,9 +87,10 @@ export const SALES_QUERIES = {
             ${hex('payment_method_id')} payment_method_id, amount, created_at
         FROM order_transaction WHERE version_id = ${LIVE} ORDER BY ${hex('order_id')}, created_at, ${hex('id')}`,
 
-    // When each order, delivery and transaction reached its state: payment and shipping dates.
+    // Every transition of an order, delivery and transaction: payment and shipping dates, and the
+    // order history in Vendure.
     order_state_history: `SELECT h.entity_name, ${hex('h.referenced_id')} referenced_id, h.action_name,
-            ${stateOf('h.to_state_id')} to_state, h.created_at
+            ${stateOf('h.from_state_id')} from_state, ${stateOf('h.to_state_id')} to_state, h.created_at
         FROM state_machine_history h
         WHERE h.entity_name IN ('order', 'order_delivery', 'order_transaction') AND h.referenced_version_id = ${LIVE}
         ORDER BY h.created_at, ${hex('h.id')}`,

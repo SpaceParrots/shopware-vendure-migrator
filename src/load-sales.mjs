@@ -16,6 +16,17 @@ import { need } from './load/context.mjs';
 const PLACEHOLDER = { sku: 'SHOPWARE-ARCHIVED', name: 'Archived Shopware product', slug: 'archived-shopware-product' };
 
 /**
+ * Refuses a sales model written before customers and orders carried their history: every item
+ * would fail on its own, with a message that does not say why.
+ * @throws {Error} When a customer or order of the model has no `history`.
+ */
+export function requireHistory(model) {
+    if ([...model.customers, ...model.orders].some(x => !Array.isArray(x.history))) {
+        throw new Error('sales-model.json predates order and customer history: run transform-sales again.');
+    }
+}
+
+/**
  * The customer's groups as Vendure references. Goes through need(), as in load: a customer written
  * without an unbound group would be bound and skipped forever, so the group would never be added.
  * @throws {import('./load/context.mjs').MissingDependencyError} When a group is not bound.
@@ -64,6 +75,7 @@ async function bootVendure(configPath) {
 export async function loadSales(config, snapshotDir) {
     const startedAt = new Date().toISOString();
     const model = await readJson(path.join(snapshotDir, 'sales-model.json'));
+    requireHistory(model);
     const bindings = await openBindings(config, snapshotDir);
     const { core, app } = await bootVendure(config.target.configPath);
     const failures = [];
@@ -73,6 +85,8 @@ export async function loadSales(config, snapshotDir) {
     try {
         const connection = app.get(core.TransactionalConnection);
         const ds = connection.rawConnection;
+        // @vendure/core does not export the history entities; TypeORM knows them by name.
+        const { OrderHistoryEntry, CustomerHistoryEntry } = historyEntities(ds);
         const channel = await app.get(core.ChannelService).getDefaultChannel();
         const ctx = new core.RequestContext({ apiType: 'admin', isAuthorized: true, authorizedAsOwnerOnly: false, channel });
         const step = async (name, run) => {
@@ -137,6 +151,10 @@ export async function loadSales(config, snapshotDir) {
                                 defaultShippingAddress: a.defaultShippingAddress, defaultBillingAddress: a.defaultBillingAddress,
                             }));
                         }
+                        for (const e of cu.history) {
+                            const at = new Date(`${e.at}Z`);
+                            await m.save(new CustomerHistoryEntry({ type: e.type, isPublic: false, customer, data: e.data, createdAt: at, updatedAt: at }));
+                        }
                         return customer.id;
                     });
                     await bindings.set('customer', cu.sourceId, 'customer', id);
@@ -188,7 +206,7 @@ export async function loadSales(config, snapshotDir) {
             for (const o of model.orders) {
                 if (bindings.get('order', o.sourceId, 'order')) { c.skipped++; continue; }
                 try {
-                    const { id, fromInvoice } = await ds.transaction(m => writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings }));
+                    const { id, fromInvoice } = await ds.transaction(m => writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings, OrderHistoryEntry }));
                     await bindings.set('order', o.sourceId, 'order', id);
                     // Recorded after the commit, so a rolled-back order never shows up here.
                     if (fromInvoice) totalsFromInvoice.push(fromInvoice);
@@ -206,17 +224,29 @@ export async function loadSales(config, snapshotDir) {
     return result;
 }
 
+/**
+ * The order and customer history entity classes of the booted Vendure.
+ * @throws {Error} When the data source does not know them (not a Vendure connection).
+ */
+function historyEntities(ds) {
+    const target = name => {
+        if (!ds.hasMetadata(name)) throw new Error(`Vendure's data source has no entity ${name}`);
+        return ds.getMetadata(name).target;
+    };
+    return { OrderHistoryEntry: target('OrderHistoryEntry'), CustomerHistoryEntry: target('CustomerHistoryEntry') };
+}
+
 const taxLine = (rate, description) => [{ description: `${rate}%${description ? ` ${description}` : ''}`, taxRate: rate }];
 
 /**
- * Writes one order with its lines, surcharges, shipping line, payments, refund and fulfillment,
+ * Writes one order with its lines, surcharges, shipping line, payments, refund, fulfillment and history,
  * inside the caller's transaction.
  * @returns {Promise<{ id: string|number, fromInvoice: object|null }>} `fromInvoice` describes the
  *   totals when Shopware's invoice total was stored instead of Vendure's calculation.
  * @throws {Error} When the customer, a variant or the shipping method is not bound, or the calculated totals miss the
  *   invoice by more than one minor unit per surcharge.
  */
-async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings }) {
+async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings, OrderHistoryEntry }) {
     const customerId = o.customerSourceId ? bindings.get('customer', o.customerSourceId, 'customer') : undefined;
     if (o.customerSourceId && !customerId) throw new Error(`customer ${o.customerSourceId} is not bound`);
     if (!customerId) throw new Error('order without a migrated customer');
@@ -279,22 +309,26 @@ async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholde
         await m.save(s);
     }
     let lastPayment;
+    const paymentIds = new Map();
     for (const p of o.payments) {
         lastPayment = await m.save(new core.Payment({
             method: p.method, amount: p.amount, state: p.state, transactionId: p.sourceId, order,
             metadata: { public: { shopwarePaymentMethod: p.methodName, shopwareState: p.shopwareState } },
             createdAt: new Date(`${p.createdAt}Z`),
         }));
+        paymentIds.set(p.sourceId, lastPayment.id);
     }
+    let refund;
+    let fulfillment;
     if (o.refund) {
-        await m.save(new core.Refund({
+        refund = await m.save(new core.Refund({
             items: 0, shipping: 0, adjustment: o.refund.amount, total: o.refund.amount, method: lastPayment.method,
             reason: 'Refunded in Shopware', state: 'Settled', transactionId: lastPayment.transactionId, payment: lastPayment,
             metadata: {}, createdAt: o.refund.createdAt ? new Date(`${o.refund.createdAt}Z`) : placedAt,
         }));
     }
     if (o.fulfillment) {
-        const fulfillment = await m.save(new core.Fulfillment({
+        fulfillment = await m.save(new core.Fulfillment({
             state: o.fulfillment.state, method: o.fulfillment.method, trackingCode: o.fulfillment.trackingCode,
             handlerCode: 'manual-fulfillment', orders: [order],
             createdAt: o.fulfillment.createdAt ? new Date(`${o.fulfillment.createdAt}Z`) : placedAt,
@@ -303,5 +337,32 @@ async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholde
             await m.save(new core.FulfillmentLine({ fulfillment, orderLine: l, quantity: l.quantity }));
         }
     }
+    // In time order, so ids follow Shopware's sequence where two entries share a timestamp.
+    for (const e of o.history) {
+        const at = new Date(`${e.at}Z`);
+        await m.save(new OrderHistoryEntry({
+            type: e.type, isPublic: e.isPublic, order,
+            data: { ...historyRefs(e, { paymentIds, refund, fulfillment }), ...e.data },
+            createdAt: at, updatedAt: at,
+        }));
+    }
     return { id: order.id, fromInvoice };
+}
+
+/**
+ * The ids a history entry points at, as Vendure's own processes put them into `data`.
+ * @throws {Error} When the entry points at a payment, refund or fulfillment the order does not have.
+ */
+export function historyRefs(entry, { paymentIds, refund, fulfillment }) {
+    const need = (id, what) => {
+        if (id === undefined || id === null) throw new Error(`history entry ${entry.type} at ${entry.at}: no ${what}`);
+        return id;
+    };
+    switch (entry.type) {
+        case 'ORDER_PAYMENT_TRANSITION': return { paymentId: need(paymentIds.get(entry.paymentSourceId), `payment ${entry.paymentSourceId}`) };
+        case 'ORDER_REFUND_TRANSITION': return { refundId: need(refund?.id, 'refund') };
+        case 'ORDER_FULFILLMENT':
+        case 'ORDER_FULFILLMENT_TRANSITION': return { fulfillmentId: need(fulfillment?.id, 'fulfillment') };
+        default: return {};
+    }
 }

@@ -6,6 +6,7 @@ All notable changes are listed here. The project follows [Semantic Versioning](h
 
 ### Added
 
+- Order and customer history. `load-sales` writes Shopware's state history as Vendure history entries at Shopware's times: order state, payment, refund and fulfillment transitions, and customer registration and verification. `verify-sales` checks them against Shopware's MySQL. Snapshots extracted before this version lack the transitions' start states: extract again. Orders and customers loaded before are skipped as bound and get no history; load them into a fresh database.
 - MIT license, contributing guide, security policy, code of conduct, CI workflow and issue templates.
 - Documentation in `docs/`.
 

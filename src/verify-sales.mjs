@@ -10,6 +10,7 @@ import { SHOPWARE } from './config.mjs';
 import { openBindings } from './lib/bindings.mjs';
 import { log, readJson, toMinorUnits, writeJson } from './lib/util.mjs';
 import { VendureClient } from './lib/vendure-client.mjs';
+import { requireHistory } from './load-sales.mjs';
 import { normalizeEmail } from './transform/customers.mjs';
 
 const LIVE = `UNHEX('${SHOPWARE.LIVE_VERSION}')`;
@@ -24,7 +25,8 @@ const ORDER_FIELDS = `code state active orderPlacedAt total totalWithTax shippin
     payments { id method amount state refunds { total state } }
     fulfillments { state }
     taxSummary { taxRate taxTotal }
-    customFields { shopwareId shopwareStates }`;
+    customFields { shopwareId shopwareStates }
+    history(options: { take: 1000, sort: { id: ASC } }) { items { type createdAt data } }`;
 
 async function sourceFacts(config) {
     const conn = await mysql.createConnection({
@@ -37,12 +39,53 @@ async function sourceFacts(config) {
             FROM \`order\` o JOIN order_customer oc ON oc.order_id = o.id AND oc.version_id = ${LIVE}
             WHERE o.version_id = ${LIVE}`);
         const [customers] = await conn.query(`SELECT LOWER(HEX(c.id)) id, c.email, c.guest, c.first_name, c.last_name,
+                c.created_at, c.double_opt_in_confirm_date,
                 (SELECT COUNT(*) FROM customer_address a WHERE a.customer_id = c.id) addresses
             FROM customer c`);
-        return { orders, customers };
+        // Every time Shopware recorded for an order: its transitions, those of its delivery and
+        // transactions, and when each transaction was created.
+        const [historyTimes] = await conn.query(`SELECT LOWER(HEX(COALESCE(d.order_id, t.order_id, h.referenced_id))) order_id, h.created_at
+                FROM state_machine_history h
+                LEFT JOIN order_delivery d ON h.entity_name = 'order_delivery' AND d.id = h.referenced_id AND d.version_id = ${LIVE}
+                LEFT JOIN order_transaction t ON h.entity_name = 'order_transaction' AND t.id = h.referenced_id AND t.version_id = ${LIVE}
+                WHERE h.entity_name IN ('order', 'order_delivery', 'order_transaction') AND h.referenced_version_id = ${LIVE}
+            UNION ALL SELECT LOWER(HEX(order_id)), created_at FROM order_transaction WHERE version_id = ${LIVE}`);
+        return { orders, customers, historyTimes };
     } finally {
         await conn.end();
     }
+}
+
+/**
+ * What is wrong with a Vendure history: the number of entries, and entries dated at a time
+ * Shopware never recorded for the record.
+ * @param {{ createdAt: string }[]} items Vendure history entries.
+ * @param {number} expected Entries the model holds.
+ * @param {(string|null)[]} shopwareTimes Shopware's times (UTC, `YYYY-MM-DD HH:MM:SS.mmm`).
+ * @returns {string[]}
+ */
+export function historyProblems(items, expected, shopwareTimes) {
+    const problems = [];
+    if (items.length !== expected) problems.push(`${items.length} entries, expected ${expected}`);
+    const known = new Set(shopwareTimes.filter(Boolean).map(t => new Date(`${t}Z`).getTime()));
+    const unknown = items.filter(e => !known.has(new Date(e.createdAt).getTime()));
+    if (unknown.length) problems.push(`${unknown.length} entries at a time Shopware did not record, e.g. ${unknown[0].type} at ${unknown[0].createdAt}`);
+    return problems;
+}
+
+/**
+ * Whether the order state entries form one chain that ends in the order's state.
+ * @param {{ type: string, data: { from: string, to: string } }[]} items Vendure history, oldest first.
+ * @returns {string[]}
+ */
+export function stateChainProblems(items, orderState) {
+    const chain = items.filter(e => e.type === 'ORDER_STATE_TRANSITION');
+    const problems = [];
+    for (let i = 1; i < chain.length; i++) {
+        if (chain[i].data.from !== chain[i - 1].data.to) problems.push(`${chain[i - 1].data.to} is followed by a transition from ${chain[i].data.from}`);
+    }
+    if (chain.at(-1)?.data.to !== orderState) problems.push(`history ends in ${chain.at(-1)?.data.to ?? 'nothing'}, the order is ${orderState}`);
+    return problems;
 }
 
 async function all(client, field, fields) {
@@ -93,6 +136,7 @@ async function shopLogin(shopApi, timeoutMs, email, password) {
  */
 export async function verifySales(config, snapshotDir, { loginPassword = process.env.VERIFY_LOGIN_PASSWORD } = {}) {
     const model = await readJson(path.join(snapshotDir, 'sales-model.json'));
+    requireHistory(model);
     const bindings = await openBindings(config, snapshotDir, { readOnly: true });
     const client = new VendureClient(config.target, config.http);
     await client.login();
@@ -105,7 +149,7 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
     };
 
     // ----- customers
-    const customers = await all(client, 'customers', 'id emailAddress firstName lastName user { id verified } groups { name } addresses { id } customFields { shopwareId customerNumber }');
+    const customers = await all(client, 'customers', 'id emailAddress firstName lastName user { id verified } groups { name } addresses { id } customFields { shopwareId customerNumber } history(options: { take: 100 }) { items { type createdAt } }');
     const byShopwareId = new Map(customers.map(c => [c.customFields.shopwareId, c]));
     check('customers.count', customers.length === model.expected.customers ? [] : [{ expected: model.expected.customers, actual: customers.length }], 1);
     const sourceCustomers = new Map(source.customers.map(c => [c.id, c]));
@@ -126,6 +170,15 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
         if (problems.length) customerMismatches.push({ sourceId: m.sourceId, problems });
     }
     check('customers.fields', customerMismatches, model.customers.length);
+    const customerHistory = [];
+    for (const m of model.customers) {
+        const v = byShopwareId.get(m.sourceId);
+        const s = sourceCustomers.get(m.sourceId);
+        if (!v || !s) continue;
+        const problems = historyProblems(v.history.items, m.history.length, [s.created_at, s.double_opt_in_confirm_date]);
+        if (problems.length) customerHistory.push({ sourceId: m.sourceId, problems });
+    }
+    check('customers.historyAtShopwareTimes', customerHistory, model.customers.length);
     const mergedAway = Object.entries(model.mergedInto).filter(([id, into]) => id !== into);
     check('customers.mergedRowsHaveNoOwnCustomer', mergedAway.filter(([id]) => byShopwareId.has(id)).map(([id]) => ({ sourceId: id })), mergedAway.length);
 
@@ -138,7 +191,9 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
     const modelIds = new Set(model.orders.map(o => o.sourceId));
     // Refused in transform, or placed after the snapshot: listed, not compared.
     const notInModel = source.orders.filter(o => !modelIds.has(o.id)).map(o => o.order_number);
-    const amount = [], sums = [], taxes = [], taxOneCent = [], dates = [], owners = [], shapes = [], states = [], payments = [];
+    const amount = [], sums = [], taxes = [], taxOneCent = [], dates = [], owners = [], shapes = [], states = [], payments = [], histories = [];
+    const shopwareTimes = new Map();
+    for (const h of source.historyTimes) shopwareTimes.set(h.order_id, [...(shopwareTimes.get(h.order_id) ?? []), h.created_at]);
     let centsOff = 0;
     for (const m of model.orders) {
         const { code } = m;
@@ -180,6 +235,11 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
         if (!last || last.state !== lastModel.state || last.amount !== gross || refunded !== (m.refund?.amount ?? 0)) {
             payments.push({ code, expected: [lastModel.state, gross, m.refund?.amount ?? 0], actual: last ? [last.state, last.amount, refunded] : null });
         }
+        const historyProblemsOfOrder = [
+            ...historyProblems(v.history.items, m.history.length, [s.order_date_time, ...(shopwareTimes.get(m.sourceId) ?? [])]),
+            ...stateChainProblems(v.history.items, v.state),
+        ];
+        if (historyProblemsOfOrder.length) histories.push({ code, problems: historyProblemsOfOrder });
     }
     const loadResult = await readJson(path.join(snapshotDir, 'load-sales-result.json')).catch(() => null);
     const compared = model.orders.length;
@@ -196,6 +256,7 @@ export async function verifySales(config, snapshotDir, { loginPassword = process
     check('orders.lineAndSurchargeCounts', shapes, compared);
     check('orders.statesAsMapped', states, compared);
     check('orders.paymentsAndRefunds', payments, compared);
+    check('orders.historyAtShopwareTimes', histories, compared);
     const placeholderLines = orders.flatMap(o => o.lines).filter(l => l.productVariant.sku === 'SHOPWARE-ARCHIVED').length;
     check('orders.placeholderLines', placeholderLines === model.expected.placeholderLines ? [] : [{ expected: model.expected.placeholderLines, actual: placeholderLines }], 1);
 

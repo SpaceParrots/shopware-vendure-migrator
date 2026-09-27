@@ -66,6 +66,7 @@ The code follows a few rules consistently. A change should keep them.
 - `src/transform/customers.mjs`: customers, users, addresses, guest merging, password hash conversion.
 - `src/transform/orders.mjs`: orders, lines and surcharges from the order's own price JSON.
 - `src/transform/order-states.mjs`: the table mapping Shopware's three state machines to Vendure states.
+- `src/transform/order-history.mjs`: replays Shopware's state history through that table into Vendure history entries.
 
 **load**
 
