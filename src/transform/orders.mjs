@@ -119,7 +119,7 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
         },
         {
             topic: 'orders.history',
-            decision: "Shopware's state_machine_history becomes Vendure history entries at Shopware's times: order state transitions from a replay of the three machines through the state table, payment transitions per transaction, and the refund and fulfillment transitions. The placement (Vendure's checkout states) and a closing entry where the history stops short of the current state are marked data.synthetic; every other entry keeps the Shopware transition and admin username in data.shopware.",
+            decision: "Shopware's state_machine_history becomes Vendure history entries at Shopware's times: order state transitions from a replay of the three machines through the state table, payment transitions per transaction, and the refund and fulfillment transitions. The placement (Vendure's checkout states) and a closing entry where the history stops short of the current state are marked data.synthetic; every other entry keeps the Shopware transitions it stands for in data.shopware, without the admin's username, since the Shop API shows order entries to the customer.",
             why: "The dashboard shows an order's timeline from its history entries; without them an imported order has none. Vendure's own state machine would stamp the import time and trigger its side effects, so the entries are written as records.",
         },
     ];

@@ -16,6 +16,17 @@ import { need } from './load/context.mjs';
 const PLACEHOLDER = { sku: 'SHOPWARE-ARCHIVED', name: 'Archived Shopware product', slug: 'archived-shopware-product' };
 
 /**
+ * Refuses a sales model written before customers and orders carried their history: every item
+ * would fail on its own, with a message that does not say why.
+ * @throws {Error} When a customer or order of the model has no `history`.
+ */
+export function requireHistory(model) {
+    if ([...model.customers, ...model.orders].some(x => !Array.isArray(x.history))) {
+        throw new Error('sales-model.json predates order and customer history: run transform-sales again.');
+    }
+}
+
+/**
  * The customer's groups as Vendure references. Goes through need(), as in load: a customer written
  * without an unbound group would be bound and skipped forever, so the group would never be added.
  * @throws {import('./load/context.mjs').MissingDependencyError} When a group is not bound.
@@ -64,6 +75,7 @@ async function bootVendure(configPath) {
 export async function loadSales(config, snapshotDir) {
     const startedAt = new Date().toISOString();
     const model = await readJson(path.join(snapshotDir, 'sales-model.json'));
+    requireHistory(model);
     const bindings = await openBindings(config, snapshotDir);
     const { core, app } = await bootVendure(config.target.configPath);
     const failures = [];

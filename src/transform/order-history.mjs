@@ -20,10 +20,42 @@ const T = {
     fulfillmentTransition: 'ORDER_FULFILLMENT_TRANSITION',
 };
 
+// At one time, entries follow the order Vendure's own processes write them in: the checkout, then
+// the payment, refund and fulfillment, then the order state they move the order into.
+const RANK = { placement: 0, [T.payment]: 1, [T.refund]: 2, [T.fulfillment]: 3, [T.fulfillmentTransition]: 3, [T.order]: 4 };
+const rankOf = e => (e.data.synthetic === 'placement' && e.data.from === 'AddingItems' ? RANK.placement : RANK[e.type]);
+
+const byTime = (a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0);
+
+/**
+ * One machine's transitions in the order they happened. Rows come sorted by time, but two
+ * transitions in the same millisecond come back in id order, which is random: within a
+ * millisecond, each row follows the one whose target state it starts from.
+ */
+export function chainRows(rows) {
+    const chained = [];
+    let prev;
+    for (let i = 0; i < rows.length;) {
+        let j = i;
+        while (j < rows.length && rows[j].created_at === rows[i].created_at) j++;
+        const pending = rows.slice(i, j);
+        while (pending.length) {
+            const head = pending.findIndex(r => r.from_state === prev?.to_state && prev !== undefined);
+            // Without a predecessor: the row no other row of the same millisecond leads into.
+            const start = head >= 0 ? head : Math.max(0, pending.findIndex(r => !pending.some(o => o !== r && o.to_state === r.from_state)));
+            prev = pending.splice(start, 1)[0];
+            chained.push(prev);
+        }
+        i = j;
+    }
+    return chained;
+}
+
 /** The state a machine started in: before its first recorded transition, or its current state. */
 const initialState = (rows, current) => rows[0]?.from_state ?? current;
 
-const shopwareOf = (machine, r) => ({ machine, from: r.from_state, to: r.to_state, action: r.action_name, user: r.username ?? null });
+// No username: order entries are public, and the Shop API shows their data to the customer.
+const shopwareOf = (machine, r) => ({ machine, from: r.from_state, to: r.to_state, action: r.action_name });
 
 const latest = (...times) => times.filter(Boolean).sort().at(-1);
 
@@ -38,13 +70,15 @@ function replayOrderState({ order, delivery, transactions, finalOrderState }) {
         transaction: new Map(transactions.map(t => [t.id, initialState(t.rows, t.state)])),
         current: transactions[0]?.id,
     };
+    // A transition recorded before the order date (an edited order date) counts from placement.
+    const at = time => latest(order.placedAt, time);
     const events = [
-        ...order.rows.map(r => ({ at: r.created_at, apply: () => { state.order = r.to_state; }, shopware: shopwareOf('order', r) })),
-        ...(delivery?.rows ?? []).map(r => ({ at: r.created_at, apply: () => { state.delivery = r.to_state; }, shopware: shopwareOf('delivery', r) })),
-        ...transactions.flatMap(t => t.rows.map(r => ({ at: r.created_at, apply: () => { state.transaction.set(t.id, r.to_state); }, shopware: shopwareOf('transaction', r) }))),
+        ...order.rows.map(r => ({ at: at(r.created_at), apply: () => { state.order = r.to_state; }, shopware: shopwareOf('order', r) })),
+        ...(delivery?.rows ?? []).map(r => ({ at: at(r.created_at), apply: () => { state.delivery = r.to_state; }, shopware: shopwareOf('delivery', r) })),
+        ...transactions.flatMap(t => t.rows.map(r => ({ at: at(r.created_at), apply: () => { state.transaction.set(t.id, r.to_state); }, shopware: shopwareOf('transaction', r) }))),
         // A newer transaction replaces the current one from the moment it is created.
-        ...transactions.slice(1).map(t => ({ at: t.createdAt, apply: () => { state.current = t.id; }, shopware: { machine: 'transaction', created: true } })),
-    ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+        ...transactions.slice(1).map(t => ({ at: at(t.createdAt), apply: () => { state.current = t.id; }, shopware: { machine: 'transaction', created: true } })),
+    ].sort(byTime);
 
     const entries = [{ type: T.order, at: order.placedAt, isPublic: true, data: { from: 'AddingItems', to: 'ArrangingPayment', synthetic: 'placement' } }];
     let current = 'ArrangingPayment';
@@ -57,9 +91,12 @@ function replayOrderState({ order, delivery, transactions, finalOrderState }) {
         current = mapped.orderState;
     };
     step(order.placedAt, undefined, 'placement');
-    for (const e of events) {
-        e.apply();
-        step(e.at, e.shopware);
+    // Transitions at the same time are one step: in between, no combination existed.
+    for (let i = 0; i < events.length;) {
+        const group = events.filter(e => e.at === events[i].at);
+        for (const e of group) e.apply();
+        step(events[i].at, group.map(e => e.shopware));
+        i += group.length;
     }
     let closingEntries = 0;
     if (current !== finalOrderState) {
@@ -82,7 +119,7 @@ function replayPayment(t, closeAt) {
     };
     // Created with the transaction, in the state it started in.
     to(paymentStateOf(initialState(t.rows, t.state)), t.createdAt, {});
-    for (const r of t.rows) to(paymentStateOf(r.to_state), r.created_at, { shopware: shopwareOf('transaction', r) });
+    for (const r of t.rows) to(paymentStateOf(r.to_state), r.created_at, { shopware: [shopwareOf('transaction', r)] });
     let closingEntries = 0;
     if (current !== t.paymentState) {
         entries.push({ type: T.payment, at: latest(t.createdAt, t.rows.at(-1)?.created_at, closeAt), isPublic: true, paymentSourceId: t.id, data: { from: current, to: t.paymentState, synthetic: 'closing' } });
@@ -104,13 +141,17 @@ function replayPayment(t, closeAt) {
  * @param {string} input.finalOrderState The Vendure state the order is written with.
  * @param {{ createdAt?: string }} [input.refund]
  * @param {{ state: 'Shipped'|'Delivered', createdAt?: string }} [input.fulfillment]
- *   Rows are state_machine_history rows (`from_state`, `to_state`, `created_at`, `action_name`,
- *   `username`) in time order.
+ *   Rows are state_machine_history rows (`from_state`, `to_state`, `created_at`, `action_name`)
+ *   in time order; transitions within one millisecond may come in any order.
  * @returns {{ entries: object[], unmappedSteps: number, closingEntries: number }} Entries in time
  *   order. A payment entry carries `paymentSourceId`; refund and fulfillment entries leave the id
  *   to the loader.
  */
-export function buildOrderHistory({ order, delivery, transactions, finalOrderState, refund, fulfillment }) {
+export function buildOrderHistory(input) {
+    const chained = x => x && { ...x, rows: chainRows(x.rows) };
+    const { order, delivery, transactions, finalOrderState, refund, fulfillment } = {
+        ...input, order: chained(input.order), delivery: chained(input.delivery), transactions: input.transactions.map(chained),
+    };
     const orderState = replayOrderState({ order, delivery, transactions, finalOrderState });
     const payments = transactions.map((t, i) => replayPayment(t, transactions[i + 1]?.createdAt ?? orderState.entries.at(-1).at));
     const entries = [...orderState.entries, ...payments.flatMap(p => p.entries)];
@@ -131,8 +172,8 @@ export function buildOrderHistory({ order, delivery, transactions, finalOrderSta
         }
     }
 
-    // Stable: entries at the same time keep the order they were written in above.
-    entries.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    // Stable: entries of one kind at the same time keep the order they were replayed in.
+    entries.sort((a, b) => byTime(a, b) || rankOf(a) - rankOf(b));
     const sum = key => orderState[key] + payments.reduce((n, p) => n + p[key], 0);
     return { entries, unmappedSteps: sum('unmappedSteps'), closingEntries: sum('closingEntries') };
 }

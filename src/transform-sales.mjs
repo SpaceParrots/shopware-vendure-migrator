@@ -88,7 +88,7 @@ export async function transformSales(config, snapshotDir) {
     const e = model.expected;
     log(`transform-sales: ${e.customers} customers (${e.registeredCustomers} registered, ${e.guestCustomers} guest), ${e.addresses} addresses, ${e.customerGroups} groups`);
     log(`transform-sales: ${e.orders} orders, ${e.orderLines} lines, ${e.surcharges} surcharges, ${e.payments} payments, ${e.refunds} refunds, ${e.fulfillments} fulfillments, ${e.placeholderLines} placeholder lines, ${e.ordersRefused} refused`);
-    log(`transform-sales: ${e.historyEntries} order and ${e.customerHistoryEntries} customer history entries, ${gaps.orders.historyStepsNotMapped} history steps not mapped, ${gaps.orders.historyClosingEntries} closing entries`);
+    log(`transform-sales: ${e.historyEntries} order and ${e.customerHistoryEntries} customer history entries, ${gaps.orders.historyStepsNotMapped} history steps not mapped, ${gaps.orders.historyClosingEntries} closing entries, ${gaps.orders.ordersWithoutStateHistory} orders without state history`);
     log(`transform-sales: state combinations ${JSON.stringify(gaps.orders.stateCombinations)}`);
     return model;
 }

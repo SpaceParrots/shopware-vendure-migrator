@@ -2,7 +2,7 @@
 // at the time Shopware recorded the change.
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { buildCustomerHistory, buildOrderHistory } from '../src/transform/order-history.mjs';
+import { buildCustomerHistory, buildOrderHistory, chainRows } from '../src/transform/order-history.mjs';
 
 const PLACED = '2026-01-01 10:00:00.000';
 const row = (from, to, at, extra = {}) => ({ from_state: from, to_state: to, created_at: at, action_name: 'x', username: null, ...extra });
@@ -43,7 +43,8 @@ describe('buildOrderHistory', () => {
             ['Shipped', 'Delivered', '2026-01-05 12:00:00.000'],
         ]);
         const shipped = r.entries.find(e => e.data.to === 'Shipped' && e.type === 'ORDER_STATE_TRANSITION');
-        assert.deepEqual(shipped.data.shopware, { machine: 'delivery', from: 'open', to: 'shipped', action: 'x', user: 'admin' });
+        assert.deepEqual(shipped.data.shopware, [{ machine: 'delivery', from: 'open', to: 'shipped', action: 'x' }]);
+        assert.ok(!JSON.stringify(r.entries).includes('admin'), 'no staff username in entries the Shop API shows customers');
         assert.deepEqual(r.entries.filter(e => e.type.startsWith('ORDER_FULFILLMENT')).map(e => [e.type, e.data.from, e.data.to, e.at]), [
             ['ORDER_FULFILLMENT', undefined, undefined, '2026-01-03 08:00:00.000'],
             ['ORDER_FULFILLMENT_TRANSITION', 'Created', 'Pending', '2026-01-03 08:00:00.000'],
@@ -51,6 +52,69 @@ describe('buildOrderHistory', () => {
             ['ORDER_FULFILLMENT_TRANSITION', 'Shipped', 'Delivered', '2026-01-05 12:00:00.000'],
         ]);
         assert.ok(r.entries.every(e => e.type !== 'ORDER_STATE_TRANSITION' || e.isPublic));
+    });
+
+    test('transitions of one machine in the same millisecond replay in chain order, whatever order they arrive in', () => {
+        const same = '2026-01-02 08:00:00.000';
+        const r = buildOrderHistory({
+            order: { state: 'open', placedAt: PLACED, rows: [] },
+            delivery: { state: 'open', rows: [] },
+            transactions: [tx('t1', 'paid', 'Settled', [row('in_progress', 'paid', same), row('open', 'in_progress', same)])],
+            finalOrderState: 'PaymentSettled',
+        });
+        assert.deepEqual(orderStates(r.entries).map(([from, to]) => [from, to]), [
+            ['AddingItems', 'ArrangingPayment'], ['ArrangingPayment', 'PaymentAuthorized'], ['PaymentAuthorized', 'PaymentSettled'],
+        ]);
+        assert.equal(r.closingEntries, 0);
+        assert.deepEqual(r.entries.filter(e => e.paymentSourceId).map(e => e.data.to), ['Authorized', 'Settled']);
+        assert.deepEqual(r.entries.filter(e => e.paymentSourceId).at(-1).data.shopware, [{ machine: 'transaction', from: 'in_progress', to: 'paid', action: 'x' }], 'payment entries carry transitions as a list, like order entries');
+    });
+
+    test('transitions of several machines at the same time are one step', () => {
+        // completed/open/paid alone is refused; order and delivery changed together.
+        const same = '2026-01-03 00:00:00.000';
+        const r = buildOrderHistory({
+            order: { state: 'completed', placedAt: PLACED, rows: [row('open', 'completed', same)] },
+            delivery: { state: 'shipped', rows: [row('open', 'shipped', same)] },
+            transactions: [tx('t1', 'paid', 'Settled', [row('open', 'paid', '2026-01-02 00:00:00.000')])],
+            finalOrderState: 'Delivered',
+        });
+        assert.equal(r.unmappedSteps, 0);
+        const last = r.entries.filter(e => e.type === 'ORDER_STATE_TRANSITION').at(-1);
+        assert.deepEqual([last.data.from, last.data.to, last.data.shopware.map(t => t.machine)], ['PaymentSettled', 'Delivered', ['order', 'delivery']]);
+    });
+
+    test('a transition recorded before the order date is dated at the order date, keeping the chain', () => {
+        const r = buildOrderHistory({
+            order: { state: 'open', placedAt: PLACED, rows: [] },
+            delivery: { state: 'open', rows: [] },
+            transactions: [tx('t1', 'paid', 'Settled', [row('open', 'paid', '2025-12-31 23:00:00.000')], '2025-12-31 22:00:00.000')],
+            finalOrderState: 'PaymentSettled',
+        });
+        const chain = orderStates(r.entries);
+        assert.deepEqual(chain.map(([from, to]) => [from, to]), [['AddingItems', 'ArrangingPayment'], ['ArrangingPayment', 'PaymentAuthorized'], ['PaymentAuthorized', 'PaymentSettled']]);
+        assert.ok(chain.every(([, , at]) => at === PLACED));
+    });
+
+    test('at one time, entries follow the order Vendure writes them in: payment and fulfillment before the order state', () => {
+        const r = buildOrderHistory({
+            order: { state: 'in_progress', placedAt: PLACED, rows: [row('open', 'in_progress', '2026-01-03 00:00:00.000')] },
+            delivery: { state: 'shipped', rows: [row('open', 'shipped', '2026-01-03 00:00:00.000')] },
+            transactions: [tx('t1', 'paid', 'Settled', [row('open', 'paid', '2026-01-02 00:00:00.000')])],
+            finalOrderState: 'Shipped',
+            fulfillment: { state: 'Shipped', createdAt: '2026-01-03 00:00:00.000' },
+        });
+        assert.deepEqual(r.entries.map(e => [e.type.replace('ORDER_', ''), e.data.to ?? '']), [
+            ['STATE_TRANSITION', 'ArrangingPayment'],
+            ['PAYMENT_TRANSITION', 'Authorized'],
+            ['STATE_TRANSITION', 'PaymentAuthorized'],
+            ['PAYMENT_TRANSITION', 'Settled'],
+            ['STATE_TRANSITION', 'PaymentSettled'],
+            ['FULFILLMENT', ''],
+            ['FULFILLMENT_TRANSITION', 'Pending'],
+            ['FULFILLMENT_TRANSITION', 'Shipped'],
+            ['STATE_TRANSITION', 'Shipped'],
+        ]);
     });
 
     test('entries come out in time order', () => {
@@ -130,7 +194,7 @@ describe('buildOrderHistory', () => {
         const last = r.entries.filter(e => e.type === 'ORDER_STATE_TRANSITION').at(-1);
         assert.deepEqual([last.data.from, last.data.to, last.at, last.data.synthetic], ['PaymentAuthorized', 'Cancelled', '2026-01-03 00:00:00.000', 'closing']);
         assert.equal(r.closingEntries, 1, 'the payment history reaches its state, the order history does not');
-        assert.equal(r.unmappedSteps, 2);
+        assert.equal(r.unmappedSteps, 1, 'delivery and transaction were cancelled together: one refused step');
     });
 
     test('a machine without history rows has held its current state since placement', () => {
@@ -153,6 +217,23 @@ describe('buildOrderHistory', () => {
         });
         assert.deepEqual(orderStates(r.entries), [['AddingItems', 'ArrangingPayment', PLACED]]);
         assert.deepEqual(r.entries.filter(e => e.paymentSourceId).map(e => [e.data.from, e.data.to]), [['Created', 'Declined']]);
+    });
+});
+
+describe('chainRows', () => {
+    test('orders the transitions of one millisecond by their states and keeps the time order around them', () => {
+        const rows = [
+            row('a', 'b', '2026-01-01 00:00:00.000'),
+            row('c', 'd', '2026-01-01 00:00:01.000'),
+            row('b', 'c', '2026-01-01 00:00:01.000'),
+            row('d', 'e', '2026-01-01 00:00:02.000'),
+        ];
+        assert.deepEqual(chainRows(rows).map(r => r.to_state), ['b', 'c', 'd', 'e']);
+    });
+
+    test('a millisecond that starts a history begins at the row nothing leads into', () => {
+        const same = '2026-01-01 00:00:00.000';
+        assert.deepEqual(chainRows([row('y', 'z', same), row('x', 'y', same)]).map(r => r.from_state), ['x', 'y']);
     });
 });
 

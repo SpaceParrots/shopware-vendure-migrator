@@ -10,6 +10,7 @@ import { SHOPWARE } from './config.mjs';
 import { openBindings } from './lib/bindings.mjs';
 import { log, readJson, toMinorUnits, writeJson } from './lib/util.mjs';
 import { VendureClient } from './lib/vendure-client.mjs';
+import { requireHistory } from './load-sales.mjs';
 import { normalizeEmail } from './transform/customers.mjs';
 
 const LIVE = `UNHEX('${SHOPWARE.LIVE_VERSION}')`;
@@ -135,6 +136,7 @@ async function shopLogin(shopApi, timeoutMs, email, password) {
  */
 export async function verifySales(config, snapshotDir, { loginPassword = process.env.VERIFY_LOGIN_PASSWORD } = {}) {
     const model = await readJson(path.join(snapshotDir, 'sales-model.json'));
+    requireHistory(model);
     const bindings = await openBindings(config, snapshotDir, { readOnly: true });
     const client = new VendureClient(config.target, config.http);
     await client.login();

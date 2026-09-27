@@ -3,7 +3,7 @@
 // entries point at the payment, refund or fulfillment written in the same transaction.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { customerGroupRefs, historyRefs, shippingMethodRef } from '../src/load-sales.mjs';
+import { customerGroupRefs, historyRefs, requireHistory, shippingMethodRef } from '../src/load-sales.mjs';
 import { MissingDependencyError } from '../src/load/context.mjs';
 
 /** Bindings stand-in answering from a flat map keyed `type|sourceId|role`. */
@@ -43,4 +43,9 @@ test('a history entry whose payment, refund or fulfillment the order lacks fails
     assert.throws(() => historyRefs({ type: 'ORDER_PAYMENT_TRANSITION', paymentSourceId: 't9', at: 'x' }, none), /no payment t9/);
     assert.throws(() => historyRefs({ type: 'ORDER_REFUND_TRANSITION', at: 'x' }, none), /no refund/);
     assert.throws(() => historyRefs({ type: 'ORDER_FULFILLMENT', at: 'x' }, none), /no fulfillment/);
+});
+
+test('a sales model written before history existed is refused as a whole, with the fix', () => {
+    assert.throws(() => requireHistory({ customers: [{ history: [] }], orders: [{}] }), /run transform-sales again/);
+    assert.doesNotThrow(() => requireHistory({ customers: [{ history: [] }], orders: [{ history: [] }] }));
 });
