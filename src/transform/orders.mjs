@@ -8,6 +8,7 @@
 // surcharges: one per tax rate of the line, with that rate's share, because a Vendure surcharge has
 // one tax rate and Shopware spreads a discount over the rates of the cart.
 import { groupBy, toMinorUnits } from '../lib/util.mjs';
+import { buildOrderHistory } from './order-history.mjs';
 import { mapOrderStates } from './order-states.mjs';
 
 const SURCHARGE_TYPES = new Set(['promotion', 'credit', 'custom']);
@@ -47,6 +48,8 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
     // Latest time each entity reached each state.
     const reached = new Map();
     for (const h of raw.order_state_history) reached.set(`${h.referenced_id}|${h.to_state}`, h.created_at);
+    // Every transition of an order, delivery or transaction, in time order.
+    const historyByRef = groupBy(raw.order_state_history, 'referenced_id');
 
     const orders = [];
     const refused = [];
@@ -64,9 +67,14 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
         sharesNotSummingToLineTotal: 0,
         ordersWithoutCustomerRow: 0,
         ordersOfRefusedCustomers: 0,
+        // Order history: steps whose combination the state table refuses are skipped; a closing
+        // entry stands in where Shopware's history stops short of the current state.
+        historyStepsNotMapped: 0,
+        historyClosingEntries: 0,
+        ordersWithoutStateHistory: 0,
     };
 
-    const lookups = { linesByOrder, deliveriesByOrder, transactionsByOrder, customerByOrder, customerIds, addresses, payments, shippings, reached, mergedInto, offerIds, familyIds };
+    const lookups = { linesByOrder, deliveriesByOrder, transactionsByOrder, customerByOrder, customerIds, addresses, payments, shippings, reached, historyByRef, mergedInto, offerIds, familyIds };
     for (const o of raw.orders) {
         const result = buildOrder(o, lookups, gaps);
         if (result.ok) orders.push(result.order);
@@ -106,8 +114,13 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
         },
         {
             topic: 'orders.sideEffects',
-            decision: 'No stock movements, allocations, sales, history entries or events are created for imported orders.',
+            decision: 'No stock movements, allocations, sales or events are created for imported orders.',
             why: "Shopware's current stock is already migrated with the catalogue; replaying orders would count every sale twice and could send mails.",
+        },
+        {
+            topic: 'orders.history',
+            decision: "Shopware's state_machine_history becomes Vendure history entries at Shopware's times: order state transitions from a replay of the three machines through the state table, payment transitions per transaction, and the refund and fulfillment transitions. The placement (Vendure's checkout states) and a closing entry where the history stops short of the current state are marked data.synthetic; every other entry keeps the Shopware transition and admin username in data.shopware.",
+            why: "The dashboard shows an order's timeline from its history entries; without them an imported order has none. Vendure's own state machine would stamp the import time and trigger its side effects, so the entries are written as records.",
         },
     ];
     const expected = {
@@ -118,6 +131,7 @@ export function buildOrders(raw, { mergedInto, offerIds, familyIds = new Set() }
         refunds: orders.filter(o => o.refund).length,
         fulfillments: orders.filter(o => o.fulfillment).length,
         placeholderLines: orders.reduce((n, o) => n + o.lines.filter(l => !l.productSourceId).length, 0),
+        historyEntries: orders.reduce((n, o) => n + o.history.length, 0),
     };
     return { orders, refused, decisions, gaps, expected };
 }
@@ -139,7 +153,7 @@ function buildOrder(o, lookups, gaps) {
     }
 }
 
-function mapOrder(o, { linesByOrder, deliveriesByOrder, transactionsByOrder, customerByOrder, customerIds, addresses, payments, shippings, reached, mergedInto, offerIds, familyIds }, gaps) {
+function mapOrder(o, { linesByOrder, deliveriesByOrder, transactionsByOrder, customerByOrder, customerIds, addresses, payments, shippings, reached, historyByRef, mergedInto, offerIds, familyIds }, gaps) {
     const decimals = parse(o.item_rounding)?.decimals ?? 2;
     const money = (amount, what) => {
         const m = toMinorUnits(amount, decimals);
@@ -255,6 +269,27 @@ function mapOrder(o, { linesByOrder, deliveriesByOrder, transactionsByOrder, cus
         state: { failed: 'Declined', cancelled: 'Cancelled' }[t.state] ?? 'Cancelled',
     }));
     const lastPayment = { ...payment(lastTransaction), state: mapped.paymentState };
+    const allPayments = [...earlierPayments, lastPayment];
+    const refund = mapped.refund === 'full' ? { amount: lastPayment.amount, createdAt: reached.get(`${lastTransaction.id}|refunded`) } : null;
+    const fulfillment = mapped.fulfillmentState ? {
+        state: mapped.fulfillmentState,
+        method: shippingMethod?.name ?? 'Shopware shipping',
+        trackingCode: trackingCodes.join(', '),
+        createdAt: reached.get(`${delivery.id}|shipped`) ?? reached.get(`${delivery.id}|${delivery.state}`),
+    } : null;
+
+    const rowsOf = id => historyByRef.get(id) ?? [];
+    const history = buildOrderHistory({
+        order: { state: o.state, placedAt: o.order_date_time, rows: rowsOf(o.id) },
+        delivery: delivery ? { state: delivery.state, rows: rowsOf(delivery.id) } : undefined,
+        transactions: transactions.map((t, i) => ({ id: t.id, state: t.state, paymentState: allPayments[i].state, createdAt: t.created_at, rows: rowsOf(t.id) })),
+        finalOrderState: mapped.orderState,
+        refund,
+        fulfillment,
+    });
+    gaps.historyStepsNotMapped += history.unmappedSteps;
+    gaps.historyClosingEntries += history.closingEntries;
+    if (![o.id, delivery?.id, ...transactions.map(t => t.id)].some(id => rowsOf(id).length)) gaps.ordersWithoutStateHistory++;
 
     return {
         sourceId: o.id,
@@ -278,14 +313,10 @@ function mapOrder(o, { linesByOrder, deliveriesByOrder, transactionsByOrder, cus
             listPriceIncludesTax: gross,
             taxRate: Number(shippingTaxes[0]?.taxRate ?? shippingCosts.calculatedTaxes?.[0]?.taxRate ?? 0),
         },
-        payments: [...earlierPayments, lastPayment],
-        refund: mapped.refund === 'full' ? { amount: lastPayment.amount, createdAt: reached.get(`${lastTransaction.id}|refunded`) } : null,
-        fulfillment: mapped.fulfillmentState ? {
-            state: mapped.fulfillmentState,
-            method: shippingMethod?.name ?? 'Shopware shipping',
-            trackingCode: trackingCodes.join(', '),
-            createdAt: reached.get(`${delivery.id}|shipped`) ?? reached.get(`${delivery.id}|${delivery.state}`),
-        } : null,
+        payments: allPayments,
+        refund,
+        fulfillment,
+        history: history.entries,
         // What Shopware charged, for the compare stage and load-sales' invoice tolerance.
         source: {
             totalWithTax: money(o.amount_total, 'amount_total'),

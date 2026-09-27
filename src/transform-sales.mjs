@@ -38,6 +38,7 @@ export function buildSalesModel(raw, catalogue) {
             registeredCustomers: customers.customers.filter(c => !c.guest).length,
             guestCustomers: customers.customers.filter(c => c.guest).length,
             addresses: customers.customers.reduce((n, c) => n + c.addresses.length, 0),
+            customerHistoryEntries: customers.customers.reduce((n, c) => n + c.history.length, 0),
             ...orders.expected,
             ordersRefused: orders.refused.length,
         },
@@ -72,6 +73,11 @@ export async function transformSales(config, snapshotDir) {
     const { manifest, raw } = await readSnapshot(snapshotDir);
     const missing = SALES_RAW_FILES.filter(f => !manifest.files[f]);
     if (missing.length) throw new Error(`Snapshot ${path.basename(snapshotDir)} has no ${missing.join(', ')}; extract again with this migrator version.`);
+    // Older snapshots read only the target state of each transition; the history replay needs
+    // where it started, or every machine would seem to begin in its current state.
+    if (raw.order_state_history.length && !('from_state' in raw.order_state_history[0])) {
+        throw new Error(`Snapshot ${path.basename(snapshotDir)} has no from_state in order_state_history; extract again with this migrator version.`);
+    }
     const modelFile = path.join(snapshotDir, 'model.json');
     if (!(await fs.stat(modelFile).catch(() => null))) throw new Error('model.json is missing: run transform on this snapshot first.');
     const catalogue = await readJson(modelFile);
@@ -82,6 +88,7 @@ export async function transformSales(config, snapshotDir) {
     const e = model.expected;
     log(`transform-sales: ${e.customers} customers (${e.registeredCustomers} registered, ${e.guestCustomers} guest), ${e.addresses} addresses, ${e.customerGroups} groups`);
     log(`transform-sales: ${e.orders} orders, ${e.orderLines} lines, ${e.surcharges} surcharges, ${e.payments} payments, ${e.refunds} refunds, ${e.fulfillments} fulfillments, ${e.placeholderLines} placeholder lines, ${e.ordersRefused} refused`);
+    log(`transform-sales: ${e.historyEntries} order and ${e.customerHistoryEntries} customer history entries, ${gaps.orders.historyStepsNotMapped} history steps not mapped, ${gaps.orders.historyClosingEntries} closing entries`);
     log(`transform-sales: state combinations ${JSON.stringify(gaps.orders.stateCombinations)}`);
     return model;
 }

@@ -8,6 +8,7 @@
 // - Shopware 5 imports keep the old hash in legacy_password with a legacy_encoder; Vendure has no
 //   upgrade-on-login for those without a custom authentication strategy.
 import { groupBy } from '../lib/util.mjs';
+import { buildCustomerHistory } from './order-history.mjs';
 
 /**
  * Normalises an email the way Vendure's normalizeEmailAddress does for lookups: trimmed and
@@ -127,6 +128,8 @@ export function buildCustomers(raw) {
         // A guest keeps no address book in Vendure either; its addresses live on its orders.
         const addresses = guest ? [] : (addressesByCustomer.get(c.id) ?? []).map(a => address(a, defaults));
         const billing = addresses.find(a => a.defaultBillingAddress);
+        // Shopware sets active = 0 while a double opt-in registration is unconfirmed.
+        const verified = Boolean(Number(c.active));
         const customer = {
             sourceId: c.id,
             email,
@@ -137,12 +140,12 @@ export function buildCustomers(raw) {
             phoneNumber: billing?.phoneNumber,
             customerNumber: c.customer_number,
             groupSourceIds: guest ? [] : [c.customer_group_id],
-            // Shopware sets active = 0 while a double opt-in registration is unconfirmed.
-            verified: Boolean(Number(c.active)),
+            verified,
             passwordHash: password,
             createdAt: c.created_at,
             lastLogin: c.last_login ?? undefined,
             addresses,
+            history: buildCustomerHistory({ guest, verified, createdAt: c.created_at, verifiedAt: c.double_opt_in_confirm_date ?? undefined }),
         };
         customers.push(customer);
         primaryByEmail.set(email, customer);
