@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately through GitHub's [private vulnerability reporting](https://github.com/kevmtt/shopware-vendure-migrator/security/advisories/new) for this repository. Do not open a public issue.
+Please report security issues privately through GitHub's [private vulnerability reporting](https://github.com/SpaceParrots/shopware-vendure-migrator/security/advisories/new) for this repository. Do not open a public issue.
 
 Include what an attacker controls, what they gain, and the steps to reproduce. You will get an answer within a week.
 

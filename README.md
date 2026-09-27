@@ -1,6 +1,6 @@
 # Shopware 6 to Vendure 3 migrator
 
-[![CI](https://github.com/kevmtt/shopware-vendure-migrator/actions/workflows/ci.yml/badge.svg)](https://github.com/kevmtt/shopware-vendure-migrator/actions/workflows/ci.yml)
+[![CI](https://github.com/SpaceParrots/shopware-vendure-migrator/actions/workflows/ci.yml/badge.svg)](https://github.com/SpaceParrots/shopware-vendure-migrator/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A command-line tool that copies the product catalogue of a Shopware 6.7 shop into Vendure 3.7, and then its customers and order history.

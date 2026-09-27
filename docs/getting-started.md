@@ -15,7 +15,7 @@ Other versions may work, but the SQL in `src/extract.mjs` and the constants in `
 ## Install
 
 ```sh
-git clone https://github.com/kevmtt/shopware-vendure-migrator.git
+git clone https://github.com/SpaceParrots/shopware-vendure-migrator.git
 cd shopware-vendure-migrator
 npm install
 cp .env.example .env
