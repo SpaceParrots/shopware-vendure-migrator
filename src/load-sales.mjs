@@ -11,8 +11,27 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { openBindings } from './lib/bindings.mjs';
 import { log, readJson, writeJson } from './lib/util.mjs';
+import { need } from './load/context.mjs';
 
 const PLACEHOLDER = { sku: 'SHOPWARE-ARCHIVED', name: 'Archived Shopware product', slug: 'archived-shopware-product' };
+
+/**
+ * The customer's groups as Vendure references. Goes through need(), as in load: a customer written
+ * without an unbound group would be bound and skipped forever, so the group would never be added.
+ * @throws {import('./load/context.mjs').MissingDependencyError} When a group is not bound.
+ */
+export function customerGroupRefs(bindings, groupSourceIds) {
+    return groupSourceIds.map(g => ({ id: need(bindings.get('customerGroup', g, 'customerGroup'), `customer group ${g}`) }));
+}
+
+/**
+ * The bound shipping method of an order, or null when the Shopware order had none.
+ * @throws {import('./load/context.mjs').MissingDependencyError} When the method is not bound.
+ */
+export function shippingMethodRef(bindings, methodSourceId) {
+    if (!methodSourceId) return null;
+    return need(bindings.get('shippingMethod', methodSourceId, 'shippingMethod'), `shipping method ${methodSourceId}`);
+}
 
 /**
  * Boots Vendure with the target's config, without the job queue and without an HTTP server.
@@ -102,7 +121,7 @@ export async function loadSales(config, snapshotDir) {
                                 await m.save(new core.NativeAuthenticationMethod({ identifier: cu.email, passwordHash: cu.passwordHash, user }));
                             }
                         }
-                        const groups = cu.groupSourceIds.map(g => ({ id: bindings.get('customerGroup', g, 'customerGroup') })).filter(g => g.id);
+                        const groups = customerGroupRefs(bindings, cu.groupSourceIds);
                         const customer = await m.save(new core.Customer({
                             emailAddress: cu.email, title: cu.title ?? '', firstName: cu.firstName ?? '', lastName: cu.lastName ?? '',
                             phoneNumber: cu.phoneNumber ?? '', user, channels: [channel], groups,
@@ -194,7 +213,7 @@ const taxLine = (rate, description) => [{ description: `${rate}%${description ? 
  * inside the caller's transaction.
  * @returns {Promise<{ id: string|number, fromInvoice: object|null }>} `fromInvoice` describes the
  *   totals when Shopware's invoice total was stored instead of Vendure's calculation.
- * @throws {Error} When the customer or a variant is not bound, or the calculated totals miss the
+ * @throws {Error} When the customer, a variant or the shipping method is not bound, or the calculated totals miss the
  *   invoice by more than one minor unit per surcharge.
  */
 async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholderId, bindings }) {
@@ -219,9 +238,8 @@ async function writeOrder(m, core, { o, channel, taxZoneId, variants, placeholde
         description: s.description, sku: s.sku, listPrice: s.listPrice, listPriceIncludesTax: s.listPriceIncludesTax,
         taxLines: taxLine(s.taxRate), createdAt: placedAt,
     }));
-    const shippingMethodId = o.shipping.methodSourceId ? bindings.get('shippingMethod', o.shipping.methodSourceId, 'shippingMethod') : undefined;
     const shippingLine = new core.ShippingLine({
-        shippingMethodId: shippingMethodId ?? null, listPrice: o.shipping.listPrice, listPriceIncludesTax: o.shipping.listPriceIncludesTax,
+        shippingMethodId: shippingMethodRef(bindings, o.shipping.methodSourceId), listPrice: o.shipping.listPrice, listPriceIncludesTax: o.shipping.listPriceIncludesTax,
         adjustments: [], taxLines: taxLine(o.shipping.taxRate), createdAt: placedAt,
     });
 

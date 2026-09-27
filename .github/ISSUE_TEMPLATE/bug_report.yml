@@ -1,0 +1,42 @@
+name: Bug report
+description: A stage fails, or migrates data differently from what Shopware shows.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste customer data, password hashes or whole snapshot files. Security issues go through SECURITY.md.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Shopware, Vendure and Node.js versions.
+      placeholder: Shopware 6.7.14.2, Vendure 3.7.3, Node 22.17
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Stage
+      options: [extract, transform, load, verify, oracle, transform-sales, load-sales, verify-sales, other]
+    validations:
+      required: true
+  - type: textarea
+    id: shopware
+    attributes:
+      label: What Shopware shows
+      description: The product, price, customer or order as it appears in Shopware (admin or storefront).
+    validations:
+      required: true
+  - type: textarea
+    id: migrator
+    attributes:
+      label: What the migrator produced
+      description: The error message, or the relevant excerpt of gaps.json, load-result.json or report.md.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else

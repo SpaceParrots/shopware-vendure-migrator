@@ -26,13 +26,13 @@ Stages:
                    Admin and Shop API. Writes verify-sales-report.json.
 
 Flags:
-  --snapshot <id>  Snapshot folder under <out>/snapshots/ for transform, load, verify
-                   and oracle. Defaults to the newest. extract and all always start
-                   a new snapshot.
+  --snapshot <id>  Snapshot folder under <out>/snapshots/ for every stage but extract
+                   and all. Defaults to the newest. extract and all always start a
+                   new snapshot.
   -h, --help       Show this help.
 
-Exit code 1 when a stage throws, load records failures, verify has failed checks or
-oracle finds resolver mismatches.
+Exit code 1 when a stage throws, load or load-sales records failures, verify or
+verify-sales has failed checks, or oracle finds resolver mismatches.
 
 Settings come from environment variables; see .env.example.
 `;

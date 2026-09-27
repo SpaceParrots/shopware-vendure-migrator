@@ -1,0 +1,20 @@
+name: Feature request
+description: Migrate something that is not migrated yet, or support another version.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: data
+    attributes:
+      label: Shopware data
+      description: What Shopware data should be migrated, and how many rows does your shop have (see gaps.json)?
+    validations:
+      required: true
+  - type: textarea
+    id: target
+    attributes:
+      label: Vendure target
+      description: Where should it end up in Vendure (core field, custom field, plugin)?
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
