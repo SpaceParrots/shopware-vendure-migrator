@@ -168,6 +168,22 @@ describe('buildOrders', () => {
         assert.match(refusedWith('deleted').refused[0].reason, /no longer exists/);
     });
 
+    test('the order carries its Shopware state history as Vendure entries at Shopware times', () => {
+        const r = raw([{ type: 'product', product_id: 'v1', label: 'P', quantity: 1, price: money(1, 1, [{ taxRate: 19, price: 1, tax: 0.16 }]) }]);
+        r.order_state_history = [{ entity_name: 'order_transaction', referenced_id: 't1', action_name: 'paid', from_state: 'open', to_state: 'paid', username: 'admin', created_at: '2026-01-02 08:00:00.000' }];
+        const b = buildOrders(r, ctx);
+        const [o] = b.orders;
+        assert.deepEqual(o.history.filter(e => e.type === 'ORDER_STATE_TRANSITION').map(e => [e.data.to, e.at]), [
+            ['ArrangingPayment', '2026-01-01 10:00:00.000'],
+            ['PaymentAuthorized', '2026-01-01 10:00:00.000'],
+            ['PaymentSettled', '2026-01-02 08:00:00.000'],
+        ]);
+        assert.deepEqual(o.history.filter(e => e.type === 'ORDER_PAYMENT_TRANSITION').map(e => [e.paymentSourceId, e.data.to]), [['t1', 'Authorized'], ['t1', 'Settled']]);
+        assert.equal(b.expected.historyEntries, o.history.length);
+        assert.equal(b.gaps.ordersWithoutStateHistory, 0);
+        assert.equal(buildOrders(raw([]), ctx).gaps.ordersWithoutStateHistory, 1);
+    });
+
     test('unmapped line types, nested lines and multi-rate product lines refuse the order', () => {
         const refusedFor = line => buildOrders(raw([line]), ctx).refused[0]?.reason;
         assert.match(refusedFor({ type: 'container', label: 'Bundle', quantity: 1, price: money(1, 1, []) }), /line type container/);

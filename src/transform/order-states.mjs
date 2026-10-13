@@ -22,6 +22,9 @@ const PAYMENT = {
     cancelled: 'Cancelled',
 };
 
+/** Vendure payment state for a Shopware transaction state, or undefined when it has none. */
+export const paymentStateOf = transaction => PAYMENT[transaction];
+
 /** Why a payment state is an approximation; shown per order in the model and counted in gaps. */
 const PAYMENT_NOTE = {
     open: 'unpaid transaction imported as an authorized payment',

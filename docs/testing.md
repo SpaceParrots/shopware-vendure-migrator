@@ -14,7 +14,7 @@ The tests use `node:test` and need no database or server; Vendure, Shopware and 
 | `test/client-http.test.mjs` | Timeouts, status in errors, bounded retries, and that queries retry while mutations and asset uploads do not. |
 | `test/config-load.test.mjs` | Credentials per stage, empty values, number and URL validation, that `.env.example` lists every variable, and the snapshot folder rules. |
 | `test/load-dependencies.test.mjs` | Missing dependencies hold back dependent objects, offers without price or tax are refused, the variant price follows the channel mode, and partly created option groups and facets are completed without duplicates. |
-| `test/load-sales-refs.test.mjs` | An unbound customer group or shipping method holds back the customer or order. |
+| `test/load-sales-refs.test.mjs` | An unbound customer group or shipping method holds back the customer or order, and history entries point at the payment, refund or fulfillment of their order. |
 | `test/resolve.test.mjs` | Scalar and association inheritance, the language chain, language-major translation fallback, tax zones and the tax rules in force. |
 | `test/transform-collections.test.mjs` | Category order from the sibling chain, link categories, membership from the listing index, and the category index gap. |
 | `test/transform-facets.test.mjs` | Names of the manufacturer facet per shop language. |
@@ -23,10 +23,12 @@ The tests use `node:test` and need no database or server; Vendure, Shopware and 
 | `test/transform-prices.test.mjs` | Gross and net from the price JSON, rounding of linked sub-cent prices, refusal of unlinked ones, and currency decimals. |
 | `test/transform-products.test.mjs` | Variant names, prices and refused offers per channel mode, and inheritance of media, cover, visibility and listing categories. |
 | `test/transform-redirects.test.mjs` | Redirects for products, variants, categories and languages without own slug, unique slugs, and CSV quoting. |
+| `test/transform-order-history.test.mjs` | The replay of Shopware's state history into Vendure history entries: one entry per change of the combined state, at Shopware's time; refused steps skipped; replaced transactions; closing entries where the history stops short; customer registration and verification. |
 | `test/transform-sales.test.mjs` | Who becomes which Vendure customer, which password hashes still log in, how three Shopware states become one Vendure state, and where every cent of an order goes. |
 | `test/transform-tax.test.mjs` | Which storefront sales channel is migrated. |
 | `test/util.test.mjs` | `toMinorUnits`, half-up rounding, `toCsv`, `slugify`, and that `log` writes to stdout and `logError` to stderr. |
 | `test/verify-compare.test.mjs` | The variant, membership and name comparisons, the job queue wait, failed jobs since the load, and one full verify run that leaves the bindings untouched. |
+| `test/verify-sales-history.test.mjs` | History entries only at times Shopware recorded, in the expected number, with order state entries that chain into the order's state. |
 | `test/verify-oracle.test.mjs` | Oracle counts variants missing in Vendure, tallies rule winners by id, converts a linked sub-cent Shopware price by the transform rule, compares base, guest and rule prices in the channel mode, and counts refused offers apart from the resolver mismatches. |
 
 `load-sales` writes through Vendure's own entities and is covered by the end-to-end run below, not by unit tests; only its reference lookups are unit-tested.
