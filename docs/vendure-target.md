@@ -74,5 +74,7 @@ Custom fields change the database schema, so add them before the first start, or
 
 ## After the migration
 
+- **Clean up the job queue.** `load-sales` publishes events for customer groups, shipping methods and the placeholder product, and the target's subscribers can add jobs for them; see [Events and jobs](customers-and-orders.md#events-and-jobs). Look through the queue in the dashboard, or with the Admin API's `jobs` query. Cancel jobs your own plugins added that should not run for migrated data (`cancelJob`), for example syncs to external systems. Once the worker is idle, remove the settled jobs (`removeSettledJobs`).
+- **Rebuild the search index.** Start it from the dashboard or with the Admin API's `reindex` mutation. The rebuild reads the index from the database, so it does not depend on which update jobs ran or were cancelled.
 - Payment methods and real shipping rules are not migrated. `load-sales` creates one shipping method per Shopware method for the historical orders to point at; they carry an eligibility checker no order can pass, so they never appear at checkout. Set up the shipping and payment methods you actually use yourself.
 - Everything is created in the default channel.
